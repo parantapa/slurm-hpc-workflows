@@ -1,7 +1,6 @@
 {
-    project: "ray-hpc-workflows",
+    project: "slurm-hpc-workflows",
     remotes: {
-        rivanna: "rivanna:ray-hpc-workflows",
-        // anvil: "anvil:ray-hpc-workflows",
+        rivanna: "rivanna:slurm-hpc-workflows",
     }
 }
