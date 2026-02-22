@@ -30,15 +30,14 @@ dependencies = [
     "grpcio-tools",
     "cloudpickle",
     "typeguard",
-    "polars",
-    "runstats",
+    "ds-service-client"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [project.urls]
-"Homepage" = "http://github.com/nssac/slurm-workflows"
+"Homepage" = "http://github.com/parantapa/slurm-hpc-workflows"
 
 [project.scripts]
 "run-jupyter" = "slurm_workflows.run_jupyter:run_jupyter"
