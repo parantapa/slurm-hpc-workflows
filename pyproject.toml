@@ -31,7 +31,6 @@ dependencies = [
     "grpcio-tools",
     "cloudpickle",
     "typeguard",
-    "ds-service-client"
 ]
 
 [tool.setuptools.packages.find]

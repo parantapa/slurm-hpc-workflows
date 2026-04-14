@@ -17,7 +17,7 @@ import cloudpickle
 from typeguard import typechecked
 from tqdm import tqdm
 
-from ds_service_client import Client, TaskState
+from .ds_service_client import Client, TaskState
 
 from .slurm_utils import (
     get_running_jobids,
@@ -25,6 +25,7 @@ from .slurm_utils import (
     submit_sbatch_job,
     SlurmJob,
 )
+
 from .utils import (
     RemoteExecutionError,
     find_setup_script,
@@ -32,6 +33,7 @@ from .utils import (
     LOG_FORMAT,
     LOG_LEVEL,
 )
+
 from .templates import render_template
 
 NoOutput = object()
