@@ -21,6 +21,7 @@ dependencies = [
     "click",
     "tqdm",
     "jinja2",
+    "json5",
     "psutil",
     "netifaces",
     "platformdirs",

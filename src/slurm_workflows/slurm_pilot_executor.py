@@ -42,7 +42,7 @@ class Task:
     task_id: str
     queue: list[str]
     priority: float
-    function: Callable
+    function: Callable | str
     input: tuple
     output: Any
 
@@ -52,6 +52,9 @@ class WorkerGroup:
     name: str
     sbatch_args: list[str]
     is_batch_worker: bool
+    actor_class_name: str
+    setup_script: str
+    python_paths: list[str]
     workers: dict[str, SlurmJob] = field(default_factory=dict)
     next_worker_index: int = 0
 
@@ -61,29 +64,18 @@ class SlurmPilotExecutor:
         self,
         server_address: str,
         work_dir: Path | str | None = None,
-        setup_script: Path | str | None = None,
-        python_paths: list[str | Path] | None = None,
-        add_cwd_to_python_path: bool = True,
     ):
         self.executor_id = gen_random_string()
         self.next_task_index = 0
 
         self.server_address = server_address
         self.client = Client(server_address)
-        self.setup_script = find_setup_script(setup_script)
 
         if work_dir is None:
             now = datetime.now().isoformat()
             work_dir = platformdirs.user_cache_path(appname=f"slurm-pilot") / now
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
-
-        self.python_paths: list[str] = []
-        if python_paths is not None:
-            for path in python_paths:
-                self.python_paths.append(str(path))
-        if add_cwd_to_python_path:
-            self.python_paths.append(str(Path.cwd()))
 
         self.logger = logging.getLogger("pilot_coordinator")
         self.logger.setLevel(LOG_LEVEL)
@@ -97,10 +89,40 @@ class SlurmPilotExecutor:
 
     @typechecked
     def define_worker(
-        self, name: str, sbatch_args: list[str], is_batch_worker: bool = False
+        self,
+        name: str,
+        sbatch_args: list[str],
+        is_batch_worker: bool = False,
+        actor_class: Any | None = None,
+        setup_script: Path | str | None = None,
+        python_paths: list[str | Path] | None = None,
+        add_cwd_to_python_path: bool = True,
     ) -> None:
+        setup_script = str(find_setup_script(setup_script))
+
+        python_str_paths: list[str] = []
+        if python_paths is not None:
+            for path in python_paths:
+                python_str_paths.append(str(path))
+        if add_cwd_to_python_path:
+            python_str_paths.append(str(Path.cwd()))
+
+        if actor_class is None:
+            actor_class_name = ""
+        else:
+            actor_class_name = f"{self.executor_id}:actor_class:{name}"
+            actor_class_bytes = cloudpickle.dumps(
+                actor_class, protocol=pickle.HIGHEST_PROTOCOL
+            )
+            self.client.map_set(actor_class_name, actor_class_bytes)
+
         group = WorkerGroup(
-            name=name, sbatch_args=sbatch_args, is_batch_worker=is_batch_worker
+            name=name,
+            sbatch_args=sbatch_args,
+            is_batch_worker=is_batch_worker,
+            actor_class_name=actor_class_name,
+            setup_script=setup_script,
+            python_paths=python_str_paths,
         )
 
         if group.name in self.groups:
@@ -119,8 +141,9 @@ class SlurmPilotExecutor:
             name=name,
             server_address=self.server_address,
             work_dir=str(self.work_dir),
-            python_paths_json=json.dumps(self.python_paths),
-            setup_script=str(self.setup_script),
+            python_paths_json=json.dumps(group.python_paths),
+            setup_script=group.setup_script,
+            actor_class_name=group.actor_class_name,
         )
         worker_script_path = self.work_dir / f"{name}.sh"
         worker_script_path.write_text(worker_script)
@@ -201,7 +224,7 @@ class SlurmPilotExecutor:
     def _submit(
         self,
         queue: list[str],
-        fn: Callable,
+        fn: Callable | str,
         *args,
         **kwargs,
     ) -> Task:
@@ -233,7 +256,9 @@ class SlurmPilotExecutor:
         return task
 
     @typechecked
-    def submit(self, queue: str | list[str], fn: Callable, *args, **kwargs) -> Task:
+    def submit(
+        self, queue: str | list[str], fn: Callable | str, *args, **kwargs
+    ) -> Task:
         if isinstance(queue, str):
             queue = [queue]
 

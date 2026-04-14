@@ -130,6 +130,7 @@ def render_template(
     setup_script: str | Path,
     group: str,
     name: str,
+    actor_class_name: str,
     server_address: str,
     work_dir: str | Path,
     python_paths_json: str,

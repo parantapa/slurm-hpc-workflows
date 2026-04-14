@@ -8,6 +8,7 @@ import pickle
 import socket
 import logging
 from pathlib import Path
+from typing import Any
 
 import click
 import cloudpickle
@@ -24,6 +25,7 @@ class PilotWorkerProcess:
         self,
         group: str,
         name: str,
+        actor_class_name: str,
         server_address: str,
         work_dir: Path,
         slurm_job_id: int,
@@ -38,8 +40,20 @@ class PilotWorkerProcess:
         self.logger = logging.getLogger("worker_process")
         self.client = Client(self.server_address)
 
+        self.actor_instance: Any | None
+        if actor_class_name == "":
+            self.actor_instance = None
+        else:
+            actor_class_bytes = self.client.map_get(actor_class_name)
+            actor_class = cloudpickle.loads(actor_class_bytes)
+            self.actor_instance = actor_class()
+
     def close(self):
         self.client.close()
+        if self.actor_instance is not None:
+            if hasattr(self.actor_instance, "close"):
+                self.actor_instance.close()
+            self.actor_instance = None
 
     def main(self):
         self.logger.info("Starting worker: %s" % self.worker_id)
@@ -53,6 +67,8 @@ class PilotWorkerProcess:
                         task.task_id,
                     )
                     function = cloudpickle.loads(task.function)
+                    if self.actor_instance is not None:
+                        function = getattr(self.actor_instance, function)
                     args, kwargs = cloudpickle.loads(task.input)
 
                     self.logger.info("task_id=%s: Executing ...", task.task_id)
@@ -80,6 +96,12 @@ class PilotWorkerProcess:
 @click.command()
 @click.option("--group", type=str, required=True, help="Worker group")
 @click.option("--name", type=str, required=True, help="Worker job name")
+@click.option(
+    "--actor-class-name",
+    type=str,
+    required=True,
+    help="Name for actor class in DS server store.",
+)
 @click.option("--server-address", type=str, required=True, help="Pilot server address")
 @click.option(
     "--work-dir",
@@ -94,7 +116,12 @@ class PilotWorkerProcess:
     help="JSON encoded Python paths",
 )
 def slurm_pilot_worker(
-    group: str, name: str, server_address: str, work_dir: Path, python_paths_json: str
+    group: str,
+    name: str,
+    actor_class_name: str,
+    server_address: str,
+    work_dir: Path,
+    python_paths_json: str,
 ):
     """Start a slurm pilot worker."""
     slurm_job_id = int(os.environ.get("SLURM_JOB_ID", -1))
@@ -123,6 +150,7 @@ def slurm_pilot_worker(
         worker = PilotWorkerProcess(
             group=group,
             name=name,
+            actor_class_name=actor_class_name,
             server_address=server_address,
             work_dir=work_dir,
             slurm_job_id=slurm_job_id,
