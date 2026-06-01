@@ -102,7 +102,7 @@ pip install -v jupyterlab
 Clone slurm-workflows repository in your home directory and install it.
 ```sh
 cd $HOME
-git clone https://github.com/NSSAC/slurm-workflows.git
+git clone https://github.com/parantapa/slurm-workflows.git
 cd slurm-workflows
 pip install -ve .
 ```
@@ -115,7 +115,6 @@ Create the file `$HOME/default-env.sh` with the following content.
 
 ```sh
 module load gcc/14.2.0
-module load openmpi/5.0.7
 
 CONDA_ENVS_DIR="/project/bii_nssac/people/$USER/conda-envs"
 ```
@@ -155,13 +154,13 @@ From FoxyProxy's settings go to Options tab and import the configuration file.
 Close the FoxyProxy settings tab.
 Go back to FoxyProxy's settings and ensure that FoxyProxy is configured to enable proxy by patterns.
 
-## Start jupyter from slur-workflows on Rivanna
+## Start jupyter from slurm-workflows on Rivanna
 
 Ensure you are logged into Rivanna via ssh.
 Also ensure that `workflow-env` is still activated.
 
 ```sh
-run-jupyter -- -A bii_nssac -p bii --nodes=1 --ntasks-per-node=1 --cpus-per-task=40 --mem=0 -t 3-00:00:00
+run-jupyter -- -A bii_nssac -p bii --nodes=1 --ntasks-per-node=1 --cpus-per-task=40 --mem=0 -t 1-00:00:00
 ```
 
 Wait for the job to start.
