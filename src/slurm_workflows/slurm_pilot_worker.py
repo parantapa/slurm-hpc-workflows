@@ -7,6 +7,7 @@ import time
 import pickle
 import socket
 import logging
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +44,13 @@ class PilotWorkerProcess:
         if actor_class_name == "":
             self.actor_instance = None
         else:
-            actor_class_bytes = self.client.map_get(actor_class_name)
-            actor_class = cloudpickle.loads(actor_class_bytes)
-            self.actor_instance = actor_class()
+            class_name_parts = actor_class_name.split(".")
+            module_name = ".".join(class_name_parts[:-1])
+            class_name = class_name_parts[-1]
+
+            module = importlib.import_module(module_name)
+            klass = getattr(module, class_name)
+            self.actor_instance = klass()
 
     def close(self):
         self.client.close()

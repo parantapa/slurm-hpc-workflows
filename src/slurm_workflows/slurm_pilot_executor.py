@@ -95,7 +95,7 @@ class SlurmPilotExecutor:
         name: str,
         sbatch_args: list[str],
         is_batch_worker: bool = False,
-        actor_class: Any | None = None,
+        actor_class_name: str | None = None,
         setup_script: Path | str | None = None,
         python_paths: list[str | Path] | None = None,
         add_cwd_to_python_path: bool = True,
@@ -109,14 +109,8 @@ class SlurmPilotExecutor:
         if add_cwd_to_python_path:
             python_str_paths.append(str(Path.cwd()))
 
-        if actor_class is None:
+        if actor_class_name is None:
             actor_class_name = ""
-        else:
-            actor_class_name = f"{self.executor_id}:actor_class:{name}"
-            actor_class_bytes = cloudpickle.dumps(
-                actor_class, protocol=pickle.HIGHEST_PROTOCOL
-            )
-            self.client.map_set(actor_class_name, actor_class_bytes)
 
         group = WorkerGroup(
             name=name,
