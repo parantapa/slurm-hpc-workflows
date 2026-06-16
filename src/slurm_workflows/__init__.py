@@ -1,0 +1,1 @@
+from .slurm_pilot_executor import SlurmPilotExecutor, check_for_error

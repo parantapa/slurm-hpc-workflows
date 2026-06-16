@@ -1,6 +1,7 @@
 {
     project: "slurm-hpc-workflows",
     remotes: {
-        rivanna: "slurm-hpc-workflows",
+        rivanna: "rivanna:slurm-hpc-workflows",
+        "ivy-hip-tricr-2": "ivy-hip-tricr-2:slurm-hpc-workflows",
     }
 }

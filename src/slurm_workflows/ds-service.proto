@@ -1,0 +1,72 @@
+edition = "2023";
+
+service DsService {
+    rpc MapSet(MapSetRequest) returns (Empty) {}
+    rpc MapGet(MapGetRequest) returns (MapGetResponse) {}
+
+    rpc TaskAdd(TaskAddRequest) returns (Empty) {}
+    rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse) {}
+
+    rpc TaskGet(TaskGetRequest) returns (TaskGetResponse) {}
+    rpc TaskDone(TaskDoneRequest) returns (Empty) {}
+
+    rpc Requeue(RequeueRequest) returns (Empty) {}
+};
+
+message Empty {}
+
+message MapSetRequest {
+    string key = 1;
+    bytes value = 2;
+}
+
+message MapGetRequest {
+    string key = 1;
+}
+
+message MapGetResponse {
+    bytes value = 1;
+}
+
+message TaskAddRequest {
+    string task_id = 1;
+    repeated string queue = 2;
+    double priority = 3;
+    bytes function = 4;
+    bytes input = 5;
+}
+
+enum TaskState {
+    Ready = 0;
+    Running = 1;
+    Complete = 2;
+}
+
+message TaskStatusRequest {
+    string task_id = 1;
+}
+
+message TaskStatusResponse {
+    TaskState state = 1;
+    bytes output = 2;
+}
+
+message TaskGetRequest {
+    string worker_id = 1;
+    repeated string queue = 2;
+}
+
+message TaskGetResponse {
+    string task_id = 1;
+    bytes function = 2;
+    bytes input = 3;
+}
+
+message TaskDoneRequest {
+    string task_id = 1;
+    bytes output = 2;
+}
+
+message RequeueRequest {
+    double timeout_s = 1;
+}
