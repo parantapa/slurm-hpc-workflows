@@ -98,26 +98,26 @@ class PilotWorkerProcess:
 
 
 @click.command()
-@click.option("--group", type=str, required=True, help="Worker group")
-@click.option("--name", type=str, required=True, help="Worker job name")
+@click.option("--group", type=str, required=True, help="Worker group.")
+@click.option("--name", type=str, required=True, help="Worker job name.")
 @click.option(
     "--actor-class-name",
     type=str,
     required=True,
     help="Name for actor class in DS server store.",
 )
-@click.option("--server-address", type=str, required=True, help="Pilot server address")
+@click.option("--server-address", type=str, required=True, help="Pilot server address.")
 @click.option(
     "--work-dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
-    help="Work directory",
+    help="Work directory.",
 )
 @click.option(
     "--python-paths-json",
     type=str,
     required=True,
-    help="JSON encoded Python paths",
+    help="JSON encoded Python paths.",
 )
 def slurm_pilot_worker(
     group: str,

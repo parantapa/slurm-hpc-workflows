@@ -2,13 +2,9 @@
 
 import shlex
 import subprocess
-from pathlib import Path
 
 from .utils import (
     Closeable,
-    cmd_str,
-    data_address,
-    find_ds_server,
     terminate_gracefully,
     ignoring_sigint,
 )
@@ -19,22 +15,19 @@ class DsServer(Closeable):
 
     def __init__(
         self,
-        ds_server_exe: Path | str | None = None,
-        interface: str | None = None,
+        host: str = "0.0.0.0",
         port: int = 5051,
+        server_exe: str = "ds-server",
     ):
-        host = data_address(interface)
-
         self.address = f"{host}:{port}"
-        self.ds_server_exe = find_ds_server(ds_server_exe)
-
+        self.server_exe = server_exe
         self._proc: subprocess.Popen | None = None
 
     def start(self):
-        print("Starting server ...")
-        cmd = f"'{self.ds_server_exe!s}' --address {self.address}"
-        print("executing:", cmd_str(cmd))
+        cmd = self.server_exe + f" --address {self.address}"
         cmd = shlex.split(cmd)
+        print("Starting server ...")
+        print("executing: ", " ".join(cmd))
 
         assert self._proc is None
         with ignoring_sigint():

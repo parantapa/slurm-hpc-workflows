@@ -7,34 +7,33 @@ from pathlib import Path
 import click
 import platformdirs
 
-from .utils import find_jupyter, find_setup_script
 from .templates import render_template
 from .slurm_utils import submit_sbatch_job
+
+JUPYTER_EXE = "jupyter"
 
 
 @click.command()
 @click.option(
     "--setup-script",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    required=True,
     help="Path to setup script.",
 )
 @click.argument("sbatch-args", nargs=-1)
 def run_jupyter(
     sbatch_args: list[str],
-    setup_script: Path | None,
+    setup_script: Path,
 ):
     """Start a Jupyter Lab instance."""
     print("Sbatch args: ", " ".join(sbatch_args))
 
     name = "jupyter"
 
-    jupyter_executable = find_jupyter()
-    setup_script = find_setup_script(setup_script)
-
     script = render_template(
         "run_jupyter:script_template",
         setup_script=setup_script,
-        jupyter_executable=jupyter_executable,
+        jupyter_executable=JUPYTER_EXE,
     )
 
     now = datetime.now().isoformat()
