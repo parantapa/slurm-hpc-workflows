@@ -16,7 +16,7 @@ srun /bin/bash '{{ worker_script_path }}'
 set -Eeuo pipefail
 set -x
 
-slurm-pilot-worker \
+{{ worker_exe }} \
     --group '{{ group }}' \
     --name '{{ name }}' \
     --actor-class-name '{{ actor_class_name }}' \

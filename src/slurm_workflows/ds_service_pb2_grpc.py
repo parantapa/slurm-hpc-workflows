@@ -5,7 +5,7 @@ import warnings
 
 from slurm_workflows import ds_service_pb2 as slurm__workflows_dot_ds__service__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class DsServiceStub(object):
+class DsServiceStub:
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -71,7 +71,7 @@ class DsServiceStub(object):
                 _registered_method=True)
 
 
-class DsServiceServicer(object):
+class DsServiceServicer:
     """Missing associated documentation comment in .proto file."""
 
     def MapSet(self, request, context):
@@ -162,7 +162,7 @@ def add_DsServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class DsService(object):
+class DsService:
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod

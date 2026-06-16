@@ -10,9 +10,7 @@ from functools import cache
 from .templates import render_template
 
 COMMAND_TIMEOUT = 120
-
 SBATCH_OUTPUT_REGEX = re.compile(r"Submitted batch job (?P<id>\S*)")
-
 SLURM_USER = os.environ["USER"]
 
 SBATCH_EXE = "sbatch"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slurm-workflows"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
   { name="Parantapa Bhattacharya", email="parantapa@virginia.edu" },
 ]
@@ -22,11 +22,8 @@ dependencies = [
     "tqdm",
     "jinja2",
     "json5",
-    "psutil",
-    "netifaces",
     "platformdirs",
     "more-itertools",
-    "psycopg2-binary",
     "grpcio",
     "grpcio-tools",
     "cloudpickle",

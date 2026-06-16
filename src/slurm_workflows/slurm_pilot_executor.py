@@ -28,7 +28,6 @@ from .slurm_utils import (
 
 from .utils import (
     RemoteExecutionError,
-    find_setup_script,
     gen_random_string,
     LOG_FORMAT,
     LOG_LEVEL,
@@ -54,6 +53,7 @@ class WorkerGroup:
     name: str
     sbatch_args: list[str]
     is_batch_worker: bool
+    worker_exe: str
     actor_class_name: str
     setup_script: str
     python_paths: list[str]
@@ -94,14 +94,13 @@ class SlurmPilotExecutor:
         self,
         name: str,
         sbatch_args: list[str],
+        setup_script: str,
+        worker_exe: str = 'slurm-pilot-worker',
         is_batch_worker: bool = False,
         actor_class_name: str | None = None,
-        setup_script: Path | str | None = None,
         python_paths: list[str | Path] | None = None,
         add_cwd_to_python_path: bool = True,
     ) -> None:
-        setup_script = str(find_setup_script(setup_script))
-
         python_str_paths: list[str] = []
         if python_paths is not None:
             for path in python_paths:
@@ -115,6 +114,7 @@ class SlurmPilotExecutor:
         group = WorkerGroup(
             name=name,
             sbatch_args=sbatch_args,
+            worker_exe=worker_exe,
             is_batch_worker=is_batch_worker,
             actor_class_name=actor_class_name,
             setup_script=setup_script,
@@ -136,6 +136,7 @@ class SlurmPilotExecutor:
             group=group.name,
             name=name,
             server_address=self.server_address,
+            worker_exe=group.worker_exe,
             work_dir=str(self.work_dir),
             python_paths_json=json.dumps(group.python_paths),
             setup_script=group.setup_script,
