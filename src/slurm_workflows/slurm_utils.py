@@ -11,7 +11,6 @@ from .templates import render_template
 
 COMMAND_TIMEOUT = 120
 SBATCH_OUTPUT_REGEX = re.compile(r"Submitted batch job (?P<id>\S*)")
-SLURM_USER = os.environ["USER"]
 
 SBATCH_EXE = "sbatch"
 SQUEUE_EXE = "squeue"
@@ -41,7 +40,7 @@ def get_clean_environ() -> dict[str, str]:
 
 def get_running_jobids() -> set[int]:
     """Get the running Slurm job IDs for the given Slurm user."""
-    cmd = [SQUEUE_EXE, "-u", SLURM_USER, "--noheader", "-o", "%A"]
+    cmd = [SQUEUE_EXE, "--all", "--me", "--noheader", "--format", "%A"]
 
     proc = subprocess.run(
         cmd,
