@@ -16,8 +16,7 @@ import platformdirs
 import cloudpickle
 from typeguard import typechecked
 from tqdm import tqdm
-
-from .ds_service_client import Client, TaskState
+from ds_service_client import Client, TaskState
 
 from .slurm_utils import (
     get_running_jobids,
@@ -95,7 +94,7 @@ class SlurmPilotExecutor:
         name: str,
         sbatch_args: list[str],
         setup_script: str,
-        worker_exe: str = 'slurm-pilot-worker',
+        worker_exe: str = "slurm-pilot-worker",
         is_batch_worker: bool = False,
         actor_class_name: str | None = None,
         python_paths: list[str | Path] | None = None,

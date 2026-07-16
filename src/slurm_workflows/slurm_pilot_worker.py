@@ -13,8 +13,8 @@ from typing import Any
 
 import click
 import cloudpickle
+from ds_service_client import Client
 
-from .ds_service_client import Client
 from .utils import gen_error_id, RemoteExecutionError, LOG_FORMAT, LOG_LEVEL
 
 NEXT_TASK_RETRY_TIME_S: float = 0.1

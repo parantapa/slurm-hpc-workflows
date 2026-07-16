@@ -1,4 +1,4 @@
-"""Run a postgres database."""
+"""Run ds-service."""
 
 import shlex
 import subprocess
@@ -10,14 +10,14 @@ from .utils import (
 )
 
 
-class DsServer(Closeable):
-    """Run a postgres database locally"""
+class DsService(Closeable):
+    """Run ds-service server locally"""
 
     def __init__(
         self,
         host: str = "0.0.0.0",
         port: int = 5051,
-        server_exe: str = "ds-server",
+        server_exe: str = "ds-service",
     ):
         self.address = f"{host}:{port}"
         self.server_exe = server_exe
