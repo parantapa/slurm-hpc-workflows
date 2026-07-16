@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slurm-workflows"
-version = "0.2.0"
+dynamic = ["version"]
 authors = [
   { name="Parantapa Bhattacharya", email="parantapa@virginia.edu" },
 ]
@@ -23,9 +23,6 @@ dependencies = [
     "jinja2",
     "json5",
     "platformdirs",
-    "more-itertools",
-    "grpcio",
-    "grpcio-tools",
     "cloudpickle",
     "typeguard",
     "ds-service-client"
@@ -34,8 +31,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools_scm]
+
 [project.urls]
-"Homepage" = "http://github.com/parantapa/slurm-hpc-workflows"
+"Homepage" = "https://github.com/parantapa/slurm-hpc-workflows"
 
 [project.scripts]
 "run-jupyter" = "slurm_workflows.run_jupyter:run_jupyter"
