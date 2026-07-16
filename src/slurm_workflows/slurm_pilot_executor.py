@@ -56,8 +56,8 @@ class WorkerGroup:
     actor_class_name: str
     setup_script: str
     python_paths: list[str]
-    workers: dict[str, SlurmJob] = field(default_factory=dict)
-    next_worker_index: int = 0
+    workers: dict[str, SlurmJob] = field(default_factory=dict, compare=False)
+    next_worker_index: int = field(default=0, compare=False)
 
 
 class SlurmPilotExecutor:
@@ -161,11 +161,11 @@ class SlurmPilotExecutor:
             )
             group.workers[name] = slurm_job
         except subprocess.CalledProcessError as cp:
-            print(f"Failed to cancel slurm jobs: returncode={cp.returncode}")
+            print(f"Failed to submit slurm job: returncode={cp.returncode}")
             if cp.stdout.strip():
                 print(cp.stdout)
             if cp.stderr.strip():
-                print(cp.stdout)
+                print(cp.stderr)
             raise cp
 
     @typechecked
