@@ -32,6 +32,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools_scm]
+fallback_version = "1.0.0-dev"
 
 [project.urls]
 "Homepage" = "https://github.com/parantapa/slurm-hpc-workflows"
