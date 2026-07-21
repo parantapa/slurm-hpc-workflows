@@ -1,0 +1,108 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`slurm-workflows` is a Python library (>=3.12) providing helper utilities to run
+work on Slurm HPC clusters. Its two capabilities:
+
+1. **Pilot-job task execution** — a `concurrent.futures`-style executor
+   (`SlurmPilotExecutor`) that launches long-lived Slurm "pilot" jobs and
+   dispatches Python callables to them via a task queue.
+2. **Jupyter launcher** — the `run-jupyter` CLI submits a Jupyter Lab server as
+   a Slurm batch job.
+
+## Commands
+
+```sh
+pip install -ve .          # editable install (setuptools + setuptools_scm)
+```
+
+There is **no test suite, linter config, or CI** in this repo. `pyproject.toml`
+defines two console entry points:
+
+- `slurm-pilot-worker` — internal; invoked by generated sbatch scripts on
+  compute nodes, not by users directly.
+- `run-jupyter --setup-script <path> -- <sbatch args...>` — user-facing. Note the
+  `--setup-script` flag is **required** (the `docs/rivanna-setup.md` walkthrough
+  predates it and omits it).
+
+Deploy to clusters with `cpush` (see `.cpush.json5` for the `rivanna` /
+`ivy-hip-tricr-2` remotes).
+
+## Architecture
+
+The system has three cooperating processes, decoupled through an external task
+queue:
+
+- **Coordinator** (`SlurmPilotExecutor`, runs on the login node): defines worker
+  groups, submits/cancels pilot Slurm jobs to scale them, and submits tasks.
+- **ds-service** (external `ds-service-client` dependency): a separate task-queue
+  server holding tasks keyed by named queues. The coordinator and workers only
+  talk to each other through this server's `Client` — they never communicate
+  directly. `ds_service.py` can launch a local `ds-service` process, but the
+  server address is passed to the executor explicitly.
+- **Pilot workers** (`PilotWorkerProcess` in `slurm_pilot_worker.py`, run inside
+  Slurm jobs on compute nodes): loop calling `client.task_get(...)`, execute the
+  task, and post results back with `client.task_done(...)`.
+
+### Task flow
+
+1. `executor.define_worker(name, sbatch_args, setup_script, ...)` registers a
+   `WorkerGroup` (does not launch anything).
+2. `executor.scale_workers(name, count)` submits or cancels Slurm jobs to reach
+   `count` workers for that group. Each worker gets a rendered sbatch script.
+3. `executor.submit(queue, fn, *args, **kwargs)` cloudpickles the callable +
+   inputs and enqueues a `Task` on the named queue(s).
+4. A worker pulls it, `cloudpickle.loads` the function, runs it, and pushes the
+   cloudpickled return value back.
+5. `executor.as_completed(tasks)` / `wait(tasks)` poll `task_status` until
+   results arrive (tqdm-wrapped).
+
+### Serialization & remote errors
+
+Everything crossing the process boundary (functions, args, return values) is
+**cloudpickled**, so tasks can be closures/lambdas. Exceptions raised inside a
+worker are **not** re-raised in the coordinator — they are caught, wrapped in a
+`RemoteExecutionError(error, error_id)`, and returned as the task *output*. Use
+`check_for_error(tasks)` (exported from the package root) to find failed tasks;
+`error_id` correlates with the worker's log file.
+
+### Actors (stateful workers)
+
+If `define_worker(actor_class_name="pkg.mod.MyClass")` is set, each worker
+instantiates that class once at startup. Then `submit(queue, "method_name", ...)`
+passes a **string** as `fn`; the worker resolves it to a bound method on the
+actor instance. This is how per-worker state (loaded models, DB handles) is kept
+warm across tasks. Actor classes may define a `close()` for cleanup.
+
+### Templates (`templates/`)
+
+Sbatch and worker shell scripts are generated from Jinja2 templates using a
+**custom multi-template-per-file format**: each `.jinja` file holds several named
+templates delimited by `{#- name: "..." -#}` JSON5 headers, parsed by
+`templates/__init__.py`. Templates are addressed as `"<file_prefix>:<name>"`
+(e.g. `"slurm_pilot:worker_script"`). `render_template` carries `@overload`
+signatures documenting each template's required kwargs — **keep those overloads
+in sync when changing template variables** (the environment uses
+`StrictUndefined`, so a missing var is a hard error).
+
+### Slurm interaction (`slurm_utils.py`)
+
+Wraps `sbatch` / `squeue` / `scancel` subprocess calls. Important detail:
+`get_clean_environ()` strips all `SLURM_*` / `PMI_*` / `SRUN_*` env vars before
+calling `sbatch`, so that submitting jobs *from within* a Slurm job works
+correctly.
+
+- `is_batch_worker=True` → worker script is sourced directly (single task per
+  node); `False` → wrapped in `srun` (fans out across all tasks in the
+  allocation).
+
+## Conventions
+
+- Cleanup uses the `Closeable` ABC (`utils.py`) — context-manager +
+  `__del__`-based. `SlurmPilotExecutor.close()`/`stop()` cancel all pilot jobs.
+- Logs go to files under a per-run work dir derived from platformdirs
+  (`XDG_*`-driven on clusters; see `docs/rivanna-setup.md`).
+- Version is derived by `setuptools_scm` from git tags (fallback `1.0.0-dev`).
