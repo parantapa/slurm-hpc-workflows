@@ -1,5 +1,6 @@
 """Start a Jupyter Lab instance."""
 
+import sys
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -53,3 +54,4 @@ def run_jupyter(
             print(cp.stdout)
         if cp.stderr.strip():
             print(cp.stderr)
+        sys.exit(1)
