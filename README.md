@@ -1,5 +1,7 @@
 # slurm-workflows: HPC workflow helpers for Slurm clusters.
 
+![Futuristic banner image.](extra/banner-image.png "Futuristic banner image.")
+
 `slurm-workflows` lets you run Python functions on a Slurm cluster
 without writing sbatch scripts by hand.
 It provides a [`concurrent.futures`](https://docs.python.org/3/library/concurrent.futures.html)-inspired
