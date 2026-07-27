@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(mkdir -p .claude)",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Read(//home/appuser/workspace/ds-service/**)",
+      "Bash(python -c \"import typeguard; print\\(typeguard.__version__ if hasattr\\(typeguard,'__version__'\\) else 'n/a'\\); print\\([n for n in dir\\(typeguard\\) if 'Error' in n or 'Warn' in n]\\)\")",
+      "Bash(pip show *)",
+      "Bash(timeout 900 python -m pytest -q)",
+      "Bash(DS_SERVICE_EXE=/nonexistent PATH=/usr/bin:/bin timeout 300 python -m pytest -q)"
     ]
   }
 }

@@ -28,8 +28,15 @@ dependencies = [
     "ds-service-client"
 ]
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
 
 [tool.setuptools_scm]
 fallback_version = "1.0.0-dev"

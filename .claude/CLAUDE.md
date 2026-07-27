@@ -16,10 +16,11 @@ work on Slurm HPC clusters. Its two capabilities:
 ## Commands
 
 ```sh
-pip install -ve .          # editable install (setuptools + setuptools_scm)
+pip install -ve .[test]    # editable install (setuptools + setuptools_scm)
+pytest                     # test suite (see tests/README.md)
 ```
 
-There is **no test suite, linter config, or CI** in this repo. `pyproject.toml`
+There is **no linter config or CI** in this repo. `pyproject.toml`
 defines two console entry points:
 
 - `slurm-pilot-worker` — internal; invoked by generated sbatch scripts on
@@ -57,8 +58,10 @@ queue:
    inputs and enqueues a `Task` on the named queue(s).
 4. A worker pulls it, `cloudpickle.loads` the function, runs it, and pushes the
    cloudpickled return value back.
-5. `executor.as_completed(tasks)` / `wait(tasks)` poll `task_status` until
-   results arrive (tqdm-wrapped).
+5. `executor.as_completed(tasks)` / `wait(tasks)` poll `task_get_status` with
+   all still-pending ids in one batched call, then fetch each finished task's
+   result with `task_get_output` (tqdm-wrapped). Status and output are separate
+   RPCs — `task_get_status` returns only states.
 
 ### Serialization & remote errors
 
