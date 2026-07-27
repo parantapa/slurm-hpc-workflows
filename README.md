@@ -1,30 +1,33 @@
-# slurm-workflows: HPC workflow helpers for Slurm clusters
+# slurm-workflows: HPC workflow helpers for Slurm clusters.
 
 `slurm-workflows` lets you run Python functions on a Slurm cluster
 without writing sbatch scripts by hand.
-It provides a [`concurrent.futures`](https://docs.python.org/3/library/concurrent.futures.html) inspired interface
-that launches long-lived **pilot jobs** and dispatches tasks to them.
-This ensures that the cost of Slurm's queueing latency is paid once per worker
-instead of once per task.
+It provides a [`concurrent.futures`](https://docs.python.org/3/library/concurrent.futures.html)-inspired
+interface that launches long-lived **pilot jobs** and dispatches tasks to them,
+so Slurm's queueing latency is paid once per worker instead of once per task.
 
-## Features
+### Features
 
-- **Pilot-job task execution** — `SlurmPilotExecutor` submits reusable worker jobs
-    and streams Python callables to them through a task queue.
-- **Dynamic scaling** — grow or shrink a pool of workers at runtime.
-    workers are Slurm jobs you can be sized flexibly.
-- **Stateful actors** — keep expensive per-worker state (loaded models, DB
-  connections) warm across many tasks.
-- **Transparent serialization** — functions, arguments, and return values are
-  [cloudpickled](https://github.com/cloudpipe/cloudpickle),
-  so closures and lambdas work.
+- **Pilot-job task execution** — pay the queue wait once,
+    then dispatch tasks at queue-latency speed.
+- **Dynamic scaling** — grow or shrink a pool of workers at runtime
+    with `scale_workers`.
+- **Stateful actors** — keep expensive per-worker state
+    (loaded models, DB connections) warm across many tasks.
+- **Transparent serialization** — functions, arguments, and return values
+    are [cloudpickled](https://github.com/cloudpipe/cloudpickle),
+    so closures and lambdas work.
+- **Non-fatal remote errors** — an exception on a worker
+    doesn't kill the driver script; it comes back as the task's result.
 
 ## Requirements
 
 - Python >= 3.12
 - Access to a Slurm cluster (`sbatch`, `squeue`, `scancel` on `PATH`)
-- A running [`ds-service`](https://github.com/parantapa/ds-service)
-    server (see below), reachable from login node and the compute nodes.
+- A running [`ds-service`](https://github.com/parantapa/ds-service) server,
+  reachable from the login node *and* the compute nodes.
+  The client library is installed as a dependency;
+  the server is a separate install.
 
 ## Installation
 
@@ -34,15 +37,25 @@ cd slurm-hpc-workflows
 pip install -ve .
 ```
 
-For a full cluster setup (Miniforge environment, XDG directories, Jupyter and
-proxy configuration on UVA's Rivanna), see [`docs/rivanna-setup.md`](docs/rivanna-setup.md).
+## Concepts
+
+**Setup script.** Every worker sources a shell script
+    on its compute node before starting.
+    This is how your environment (`module load`, `conda activate`)
+    reaches the compute node — nothing is inherited from the login node.
+
+**Worker group.** A named recipe for a worker:
+    sbatch arguments, setup script, optional actor class.
+    Defining a group does not launch workers.
+    `scale_workers` method is used to start/stop workers.
+
+**Queue.** Tasks are submitted to a named queue,
+and **a worker group pulls from the queue matching its own name**.
+So `submit("gpu", ...)` is served by workers from the group named `gpu`.
 
 ## Quick start
 
-Every worker sources a **setup script** on its compute node before running.
-This is a shell snippet that activates your environment
-(e.g. `conda activate`, `module load`).
-Create one, for example `setup.sh`:
+Create a setup script, for example `setup.sh`:
 
 ```sh
 module load gcc/14.2.0
@@ -72,7 +85,7 @@ executor.define_worker(
 # 2. Launch 4 pilot jobs of that kind.
 executor.scale_workers("cpu", 4)
 
-# 3. Submit tasks to a named queue; workers pull from it.
+# 3. Submit tasks to a named queue; workers of that group pull from it.
 tasks = [executor.submit("cpu", square, i) for i in range(100)]
 
 # 4. Collect results as they complete (tqdm progress bar included).
@@ -92,11 +105,14 @@ so any Slurm option works.
 `submit` returns immediately with a `Task` handle;
 `as_completed(tasks)` (or `wait(tasks)`) blocks until results are ready.
 
+You don't have to wait for workers before submitting ---
+tasks queue up and are picked up as pilot jobs start running.
+
 ### Stateful actors
 
 To keep per-worker state warm across tasks,
 register an actor class by its importable name.
-Each worker instantiates it once,
+Each worker instantiates it once at startup,
 and you dispatch **method names** (as strings) instead of functions:
 
 ```python
@@ -125,10 +141,29 @@ tasks = [executor.submit("gpu", "predict", item) for item in dataset]
 executor.wait(tasks)
 ```
 
+The class must be importable on the compute node.
+By default the executors's current working directory
+is added to the workers' `sys.path`; add more with `python_paths=[...]`.
+
+### One worker per job, or one per task
+
+`is_batch_worker` controls how many worker processes each Slurm job starts:
+
+| Setting | Script is run with | Workers per job |
+| --- | --- | --- |
+| `is_batch_worker=False` (default) | `srun` | one per Slurm task in the allocation |
+| `is_batch_worker=True` | sourced directly | one, on the batch node |
+
+So with the default, `--nodes=4 --ntasks-per-node=2`
+gives you 8 worker processes from a single `scale_workers(..., 1)` call.
+Use `is_batch_worker=True` when you want a single process
+that owns the whole allocation (e.g. an MPI-style or whole-node job).
+
 ### Running the task-queue server
 
-The executor and workers communicate only through a `ds-service` server — they
-never talk to each other directly. You can start one locally on the login node:
+The executor and workers communicate only through a `ds-service` server
+— they never talk to each other directly.
+You can start one on the login node:
 
 ```python
 from slurm_workflows.ds_service import DsService
@@ -138,12 +173,63 @@ with DsService(host="0.0.0.0", port=5051) as ds:
     ...
 ```
 
-The server must be reachable from the compute nodes, so bind it to an address the
-workers can route to.
+The server must be reachable from the compute nodes,
+so bind it to an address the workers can route to (`0.0.0.0` above),
+and pass workers a routable host
+— a login node's cluster-internal IP, not `localhost`.
 
-## How it works
+## API reference
 
-Three processes cooperate through the task queue:
+Import from the package root:
+`from slurm_workflows import SlurmPilotExecutor, check_for_error`.
+
+### `SlurmPilotExecutor(server_address, work_dir=None)`
+
+`server_address` is the `host:port` of the `ds-service` server.
+`work_dir` defaults to a timestamped directory under the platform cache dir
+(`XDG_CACHE_HOME`-driven on Linux); generated scripts and all logs land there.
+
+| Method | Purpose |
+| --- | --- |
+| `define_worker(name, sbatch_args, setup_script, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
+| `scale_workers(name, count)` | Submit or cancel pilot jobs so the group has `count` jobs. |
+| `submit(queue, fn, *args, **kwargs) -> Task` | Enqueue a task. `queue` is a group name or a list of them; `fn` is a callable, or a method name (`str`) for actor workers. |
+| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. |
+| `wait(tasks, desc=None, unit="task")` | Same, but discards the iterator — just block until all are done. |
+| `num_groups()` / `num_workers(detail=False)` | Counts of defined groups and submitted workers; `detail=True` returns a per-group dict. |
+| `stop()` | Cancel all pilot jobs, keep the executor usable. |
+| `close()` | Cancel all pilot jobs and close the queue-server connection. |
+
+Remaining `define_worker` options:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `is_batch_worker` | `False` | See [above](#one-worker-per-job-or-one-per-task). |
+| `actor_class_name` | `None` | Fully qualified class name to instantiate once per worker. |
+| `python_paths` | `None` | Extra paths prepended to the workers' `sys.path`. |
+| `add_cwd_to_python_path` | `True` | Also add the coordinator's cwd. |
+| `worker_exe` | `"slurm-pilot-worker"` | Worker entry point, if you've wrapped or renamed it. |
+
+### `Task`
+
+`submit` returns a `Task` with `task_id`, `queue`, `priority`, `function`,
+`input`, and `output`. `output` is a sentinel until the task completes; after
+that it holds the return value — or a `RemoteExecutionError(error, error_id)`
+if the worker raised.
+
+### `check_for_error(tasks, verbose=True)`
+
+Returns the subset of `tasks` whose `output` is a `RemoteExecutionError`,
+printing each one's `error` and `error_id` unless `verbose=False`.
+
+### Worker environment
+
+Inside a task, these environment variables are set:
+
+- `PILOT_WORKER_NAME` — e.g. `slurm_pilot_worker.cpu.0`
+- `PILOT_WORKER_GROUP` — the group name
+- `DS_SERVER_ADDRESS` — the queue server address
+- plus the usual Slurm variables (`SLURM_JOB_ID`, …)
 
 | Process | Runs on | Role |
 | --- | --- | --- |
@@ -151,11 +237,52 @@ Three processes cooperate through the task queue:
 | `ds-service` | login node (or elsewhere) | holds tasks on named queues |
 | Pilot workers | compute nodes | pull tasks, execute them, return results |
 
-`scale_workers` submits Slurm jobs whose scripts (generated from Jinja templates)
-launch a `slurm-pilot-worker` process. Each worker loops: fetch a task, run it,
-post the cloudpickled result back. Exceptions on a worker are **not** re-raised in
-the coordinator — they are captured as a `RemoteExecutionError` and returned as
-the task's `output`, discoverable with `check_for_error`.
+`scale_workers` renders a shell script and an sbatch wrapper
+from Jinja templates and submits them.
+Each job sources your setup script and launches `slurm-pilot-worker`,
+which loops forever: fetch a task from its group's queue,
+cloudpickle-load the function, run it, post the cloudpickled result back.
+
+Two details worth knowing:
+
+- **Exceptions are values.** A task that raises on a worker
+ does not propagate to the coordinator.
+ The worker catches it, logs the traceback under a generated `error_id`,
+ and returns a `RemoteExecutionError` as the task's `output`.
+ Always run `check_for_error` over a completed batch.
+- **Submitting from inside a job works.** `sbatch` is invoked
+    with all `SLURM_*` / `PMI_*` / `SRUN_*` variables
+    stripped from the environment,
+    so a coordinator running inside a Slurm allocation
+    can still submit pilot jobs.
+
+## Logs and troubleshooting
+
+Everything for a run lives under the executor's `work_dir`
+(printed as `executor.work_dir`):
+
+| File | Contents |
+| --- | --- |
+| `coordinator.log` | Worker submission and cancellation from the executor's side |
+| `<worker-name>.sh`, `<worker-name>.sbatch` | The generated scripts — read these first when a job dies immediately |
+| `<worker-name>-<jobid>.out` | Slurm's stdout/stderr for the job, including setup-script failures |
+| `<worker-name>-<jobid>-<host>-<pid>.log` | The worker process's own log: task-by-task progress and full tracebacks |
+
+The `error_id` inside a `RemoteExecutionError` appears verbatim in the worker
+log next to the traceback — grep for it across the work dir to find the failing
+task's stack.
+
+Common failure modes:
+
+- **Tasks never complete, jobs are running.**
+    The queue name doesn't match a worker group name,
+    or the workers can't reach `ds-service` from the compute nodes.
+    Check the worker's `.log` file.
+- **Jobs start and exit within seconds.**
+    The setup script failed. Check the `.out` file.
+- **`ModuleNotFoundError` on a worker.**
+    The module isn't importable on the compute node
+    — add `python_paths=[...]` or install it into the environment the setup script activates.
 
 ## License
 
