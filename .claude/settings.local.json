@@ -7,7 +7,10 @@
       "Bash(python -c \"import typeguard; print\\(typeguard.__version__ if hasattr\\(typeguard,'__version__'\\) else 'n/a'\\); print\\([n for n in dir\\(typeguard\\) if 'Error' in n or 'Warn' in n]\\)\")",
       "Bash(pip show *)",
       "Bash(timeout 900 python -m pytest -q)",
-      "Bash(DS_SERVICE_EXE=/nonexistent PATH=/usr/bin:/bin timeout 300 python -m pytest -q)"
+      "Bash(DS_SERVICE_EXE=/nonexistent PATH=/usr/bin:/bin timeout 300 python -m pytest -q)",
+      "Bash(timeout 300 python -m pytest -q)",
+      "Bash(git check-ignore *)",
+      "Bash(DS_SERVICE_EXE=/home/appuser/workspace/ds-service/build/Release/ds-service timeout 300 python -m pytest -q)"
     ]
   }
 }
