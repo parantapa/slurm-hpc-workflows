@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Any
+from typing import Callable, Iterable, Any, cast
 
 import platformdirs
 import cloudpickle
@@ -35,6 +35,8 @@ from .utils import (
 from .templates import render_template
 
 NoOutput = object()
+
+POLL_INTERVAL_S: float = 0.1
 
 
 @dataclass
@@ -261,25 +263,37 @@ class SlurmPilotExecutor:
         return self._submit(queue, fn, *args, **kwargs)
 
     def _as_completed(self, tasks: list[Task]) -> Iterable[Task]:
-        cur_tasks = tasks
-        next_tasks = []
+        pending: list[Task] = []
+        for task in tasks:
+            if task.output is NoOutput:
+                pending.append(task)
+            else:
+                yield task
 
-        while cur_tasks:
-            for task in cur_tasks:
-                if task.output is NoOutput:
-                    status = self.client.task_status(task.task_id)
-                    if status.state == TaskState.Complete:
-                        task.output = cloudpickle.loads(status.output)
-                        yield task
-                        continue
-                else:
+        while pending:
+            # Status for every pending task comes back in a single request,
+            # in the same order as the ids we sent.
+            states = self.client.task_get_status([t.task_id for t in pending])
+            states = cast(list[Task], states)
+
+            next_pending: list[Task] = []
+            completed = 0
+            for task, state in zip(pending, states):
+                if state == TaskState.Complete:
+                    output = self.client.task_get_output(task.task_id)
+                    task.output = cloudpickle.loads(output)
+                    completed += 1
                     yield task
-                    continue
+                elif state == TaskState.Undefined:
+                    raise RuntimeError(
+                        f"Task {task.task_id} is unknown to the task queue server"
+                    )
+                else:
+                    next_pending.append(task)
 
-                next_tasks.append(task)
-
-            cur_tasks = next_tasks
-            next_tasks = []
+            pending = next_pending
+            if pending and not completed:
+                time.sleep(POLL_INTERVAL_S)
 
     @typechecked
     def as_completed(
