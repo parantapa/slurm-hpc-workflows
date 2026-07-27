@@ -72,17 +72,34 @@ class Closeable(ABC):
 
 
 def data_address(interface: str | None, default: str = "0.0.0.0") -> str:
-    """Find the network address for data transfer."""
-    adapters = [a.name for a in ifaddr.get_adapters()]
+    """Find the network address for data transfer.
+
+    Returns the first IPv4 address of `interface`.
+    When `interface` is None,
+    prefer Infiniband (`ib0`) if this node has it.
+
+    Falls back to `default` whenever the interface is not present on this node
+    or has no IPv4 address: nodes in a cluster do not all carry the same NICs,
+    and a login node in particular often lacks the fabric the compute nodes
+    use, so an absent interface is an expected case rather than an error.
+    """
+    adapters = {a.name: a for a in ifaddr.get_adapters()}
+
     if interface is None:
-        if "ib0" in adapters:
-            interface = "ib0"
-    if interface is None:
+        if "ib0" not in adapters:
+            return default
+        interface = "ib0"
+
+    adapter = adapters.get(interface)
+    if adapter is None:
         return default
-    a = [a for a in ifaddr.get_adapters() if a.name == interface][0]
-    ip = [ip for ip in a.ips if ip.is_IPv4][0].ip
-    assert isinstance(ip, str)
-    return ip
+
+    for ip in adapter.ips:
+        if ip.is_IPv4:
+            assert isinstance(ip.ip, str)  # IPv6 yields a tuple, IPv4 a str
+            return ip.ip
+
+    return default
 
 
 def arbitrary_free_port(host: str) -> int:

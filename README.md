@@ -174,17 +174,28 @@ The executor and workers communicate only through a `ds-service` server
 You can start one on the login node:
 
 ```python
-from slurm_workflows.ds_service import DsService
+from slurm_workflows import DsService, SlurmPilotExecutor
 
 with DsService(host="0.0.0.0", port=5051) as ds:
-    executor = SlurmPilotExecutor(server_address=ds.address)
+    ds.start()
+    ds.wait_until_ready()      # blocks until it accepts connections
+
+    executor = SlurmPilotExecutor(server_address=ds.get_address("ib0"))
     ...
 ```
+
+`start()` returns as soon as the process is spawned,
+so call `wait_until_ready()` before handing the address to anything —
+a client that connects too early
+lands in a gRPC reconnect backoff and is slow to recover.
+Omit `port` to get an arbitrary free one.
 
 The server must be reachable from the compute nodes,
 so bind it to an address the workers can route to (`0.0.0.0` above),
 and pass workers a routable host
 — a login node's cluster-internal IP, not `localhost`.
+`get_address("ib0")` picks that node's Infiniband address,
+falling back to the bind host if the interface isn't there.
 
 ## API reference
 

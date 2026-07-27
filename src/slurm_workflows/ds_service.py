@@ -1,6 +1,8 @@
 """Run ds-service."""
 
+import time
 import shlex
+import socket
 import subprocess
 
 from .utils import (
@@ -10,6 +12,9 @@ from .utils import (
     terminate_gracefully,
     ignoring_sigint,
 )
+
+
+READY_POLL_INTERVAL_S: float = 0.01
 
 
 class DsService(Closeable):
@@ -43,6 +48,36 @@ class DsService(Closeable):
             )
 
         print(f"server address: {self.host}:{self.port}")
+
+    def wait_until_ready(self, timeout: float = 30.0) -> None:
+        if self._proc is None:
+            raise RuntimeError("Server not started; call start() first")
+
+        # 0.0.0.0 and :: mean "every interface" to bind(); they are not
+        # connectable destinations, so probe loopback instead.
+        host = self.host
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+
+        deadline = time.monotonic() + timeout
+        while True:
+            returncode = self._proc.poll()
+            if returncode is not None:
+                raise RuntimeError(
+                    f"ds-service exited before becoming ready "
+                    f"(returncode={returncode})"
+                )
+
+            try:
+                with socket.create_connection((host, self.port), timeout=1.0):
+                    return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"ds-service at {host}:{self.port} was not ready "
+                        f"within {timeout}s"
+                    )
+                time.sleep(READY_POLL_INTERVAL_S)
 
     def get_address(self, interface: str | None = None) -> str:
         ip = data_address(interface, self.host)
