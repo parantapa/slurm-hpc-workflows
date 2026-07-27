@@ -138,6 +138,37 @@ class TestDefineWorker:
 
         assert executor.groups["cpu"].python_paths == ["/a"]
 
+    def test_setup_script_body_reaches_the_worker_script(
+        self, executor, fake_slurm, setup_script
+    ):
+        executor.define_worker(name="cpu", sbatch_args=[], setup_script=setup_script)
+        executor.scale_workers("cpu", 1)
+
+        script = (executor.work_dir / "slurm_pilot_worker.cpu.0.sh").read_text()
+        assert "module load gcc/14.2.0" in script
+        assert "export TEST_SETUP=1" in script
+
+    def test_accepts_an_empty_body(self, executor):
+        executor.define_worker(name="cpu", sbatch_args=[], setup_script="")
+
+        assert executor.groups["cpu"].setup_script == ""
+
+    def test_setup_script_is_optional(self, executor):
+        executor.define_worker(name="cpu", sbatch_args=[])
+
+        assert executor.groups["cpu"].setup_script == ""
+
+    def test_omitted_setup_script_still_yields_a_runnable_script(
+        self, executor, fake_slurm
+    ):
+        executor.define_worker(name="cpu", sbatch_args=[])
+        executor.scale_workers("cpu", 1)
+
+        script = (executor.work_dir / "slurm_pilot_worker.cpu.0.sh").read_text()
+        assert script.startswith("#!/bin/bash")
+        assert ". '/etc/profile'" in script
+        assert "slurm-pilot-worker \\" in script
+
     def test_rejects_wrong_argument_types(self, executor, setup_script):
         with pytest.raises(TypeCheckError):
             executor.define_worker(

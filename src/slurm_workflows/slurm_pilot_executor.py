@@ -95,7 +95,7 @@ class SlurmPilotExecutor:
         self,
         name: str,
         sbatch_args: list[str],
-        setup_script: str,
+        setup_script: str = "",
         worker_exe: str = "slurm-pilot-worker",
         is_batch_worker: bool = False,
         actor_class_name: str | None = None,

@@ -306,8 +306,6 @@ def executor(ds_service_address: str, fake_slurm: FakeSlurm, tmp_path: Path):
 
 
 @pytest.fixture
-def setup_script(tmp_path: Path) -> str:
-    """A setup script path, as define_worker expects."""
-    path = tmp_path / "setup.sh"
-    path.write_text("export TEST_SETUP=1\n")
-    return str(path)
+def setup_script() -> str:
+    """A setup script body, as define_worker expects."""
+    return "module load gcc/14.2.0\nexport TEST_SETUP=1\n"

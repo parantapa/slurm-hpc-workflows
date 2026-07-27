@@ -11,7 +11,8 @@ srun /bin/bash '{{ worker_script_path }}'
 #!/bin/bash
 
 . '/etc/profile'
-. '{{ setup_script }}'
+
+{{ setup_script }}
 
 set -Eeuo pipefail
 set -x

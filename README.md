@@ -39,10 +39,14 @@ pip install -U slurm-workflows
 
 ## Concepts
 
-**Setup script.** Every worker sources a shell script
+**Setup script.** A shell snippet that every worker runs
     on its compute node before starting.
     This is how your environment (`module load`, `conda activate`)
     reaches the compute node — nothing is inherited from the login node.
+    You pass the snippet's **text**, not a path to a file;
+    it is inlined into each generated worker script.
+    It is optional — omit it if `/etc/profile`,
+    which every worker sources first, already suffices.
 
 **Worker group.** A named recipe for a worker:
     sbatch arguments, setup script, optional actor class.
@@ -55,15 +59,6 @@ So `submit("gpu", ...)` is served by workers from the group named `gpu`.
 
 ## Quick start
 
-Create a setup script, for example `setup.sh`:
-
-```sh
-module load gcc/14.2.0
-conda activate my-env
-```
-
-Then run tasks against a pilot pool:
-
 ```python
 from slurm_workflows import SlurmPilotExecutor, check_for_error
 
@@ -72,6 +67,11 @@ def square(x):
 
 DS_SERVICE_ADDRESS = "HOST-IP:5051"
 
+SETUP_SCRIPT = """
+module load gcc/14.2.0
+conda activate my-env
+"""
+
 # server_address points at your running ds-service instance.
 executor = SlurmPilotExecutor(server_address=DS_SERVICE_ADDRESS)
 
@@ -79,7 +79,7 @@ executor = SlurmPilotExecutor(server_address=DS_SERVICE_ADDRESS)
 executor.define_worker(
     name="cpu",
     sbatch_args=["-A my_alloc", "-p standard", "--cpus-per-task=4", "-t 01:00:00"],
-    setup_script="setup.sh",
+    setup_script=SETUP_SCRIPT,
 )
 
 # 2. Launch 4 pilot jobs of that kind.
@@ -104,6 +104,14 @@ executor.close()
 so any Slurm option works.
 `submit` returns immediately with a `Task` handle;
 `as_completed(tasks)` (or `wait(tasks)`) blocks until results are ready.
+
+If you keep your setup snippet in a file, read it in yourself:
+
+```python
+from pathlib import Path
+
+executor.define_worker(..., setup_script=Path("setup.sh").read_text())
+```
 
 You don't have to wait for workers before submitting ---
 tasks queue up and are picked up as pilot jobs start running.
@@ -132,7 +140,7 @@ class Model:
 executor.define_worker(
     name="gpu",
     sbatch_args=["-A my_alloc", "-p gpu", "--gres=gpu:1", "-t 02:00:00"],
-    setup_script="setup.sh",
+    setup_script=SETUP_SCRIPT,
     actor_class_name="my_pkg.model.Model",
 )
 executor.scale_workers("gpu", 2)
@@ -191,7 +199,7 @@ Import from the package root:
 
 | Method | Purpose |
 | --- | --- |
-| `define_worker(name, sbatch_args, setup_script, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
+| `define_worker(name, sbatch_args, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
 | `scale_workers(name, count)` | Submit or cancel pilot jobs so the group has `count` jobs. |
 | `submit(queue, fn, *args, **kwargs) -> Task` | Enqueue a task. `queue` is a group name or a list of them; `fn` is a callable, or a method name (`str`) for actor workers. |
 | `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. |
@@ -204,6 +212,7 @@ Remaining `define_worker` options:
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
+| `setup_script` | `None` | Shell snippet run on the compute node before the worker starts — the text, not a path. Omit it if `/etc/profile` (always sourced) already gives workers the right environment. |
 | `is_batch_worker` | `False` | See [above](#one-worker-per-job-or-one-per-task). |
 | `actor_class_name` | `None` | Fully qualified class name to instantiate once per worker. |
 | `python_paths` | `None` | Extra paths prepended to the workers' `sys.path`. |

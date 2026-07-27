@@ -128,7 +128,7 @@ def render_template(
     template: Literal["slurm_pilot:worker_script"],
     *,
     worker_exe: str,
-    setup_script: str | Path,
+    setup_script: str,
     group: str,
     name: str,
     actor_class_name: str,

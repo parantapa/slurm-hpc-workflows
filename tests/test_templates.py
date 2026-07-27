@@ -54,7 +54,7 @@ class TestWorkerScript:
     def render(self, **overrides):
         kwargs = dict(
             worker_exe="slurm-pilot-worker",
-            setup_script="/home/me/setup.sh",
+            setup_script="module load gcc\nconda activate my-env",
             group="cpu",
             name="slurm_pilot_worker.cpu.0",
             actor_class_name="",
@@ -65,11 +65,27 @@ class TestWorkerScript:
         kwargs.update(overrides)
         return render_template("slurm_pilot:worker_script", **kwargs)
 
-    def test_sources_profile_and_setup_script(self):
+    def test_setup_script_body_is_inlined_verbatim(self):
         out = self.render()
 
+        assert "module load gcc\nconda activate my-env" in out
+        # It is a body, not a path: nothing sources it.
+        assert ". 'module load gcc" not in out
+
+    def test_multiline_body_is_not_escaped(self):
+        out = self.render(
+            setup_script='export A="x y"\nexport B=$HOME/z\n# a comment'
+        )
+
+        assert 'export A="x y"' in out
+        assert "export B=$HOME/z" in out
+        assert "# a comment" in out
+
+    def test_empty_body_is_allowed(self):
+        out = self.render(setup_script="")
+
         assert ". '/etc/profile'" in out
-        assert ". '/home/me/setup.sh'" in out
+        assert "slurm-pilot-worker \\" in out
 
     def test_fails_fast_on_setup_errors(self):
         assert "set -Eeuo pipefail" in self.render()

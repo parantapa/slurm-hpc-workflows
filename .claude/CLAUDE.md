@@ -51,7 +51,12 @@ queue:
 ### Task flow
 
 1. `executor.define_worker(name, sbatch_args, setup_script, ...)` registers a
-   `WorkerGroup` (does not launch anything).
+   `WorkerGroup` (does not launch anything). `setup_script` is optional and is
+   the **body** of the setup snippet, not a path — it is inlined verbatim into
+   each generated worker script (omitted/`None` becomes `""`, like
+   `actor_class_name`). `define_worker` rejects a value that is a path to an
+   existing file, since that would silently execute the script instead of
+   sourcing it.
 2. `executor.scale_workers(name, count)` submits or cancels Slurm jobs to reach
    `count` workers for that group. Each worker gets a rendered sbatch script.
 3. `executor.submit(queue, fn, *args, **kwargs)` cloudpickles the callable +
