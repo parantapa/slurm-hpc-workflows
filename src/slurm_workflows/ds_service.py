@@ -5,6 +5,8 @@ import subprocess
 
 from .utils import (
     Closeable,
+    arbitrary_free_port,
+    data_address,
     terminate_gracefully,
     ignoring_sigint,
 )
@@ -16,15 +18,19 @@ class DsService(Closeable):
     def __init__(
         self,
         host: str = "0.0.0.0",
-        port: int = 5051,
+        port: int | None = None,
         server_exe: str = "ds-service",
     ):
-        self.address = f"{host}:{port}"
+        if port is None:
+            port = arbitrary_free_port(host)
+
+        self.host = host
+        self.port = port
         self.server_exe = server_exe
         self._proc: subprocess.Popen | None = None
 
     def start(self):
-        cmd = self.server_exe + f" --address {self.address}"
+        cmd = self.server_exe + f" --address {self.host}:{self.port}"
         cmd = shlex.split(cmd)
         print("Starting server ...")
         print("executing: ", " ".join(cmd))
@@ -36,7 +42,11 @@ class DsService(Closeable):
                 stdin=subprocess.DEVNULL,
             )
 
-        print(f"server address: {self.address}")
+        print(f"server address: {self.host}:{self.port}")
+
+    def get_address(self, interface: str | None = None) -> str:
+        ip = data_address(interface, self.host)
+        return f"{ip}:{self.port}"
 
     def close(self):
         if self._proc is not None:
