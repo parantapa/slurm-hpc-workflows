@@ -34,9 +34,7 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
 ## Installation
 
 ```sh
-git clone https://github.com/parantapa/slurm-hpc-workflows.git
-cd slurm-hpc-workflows
-pip install -ve .
+pip install -U slurm-workflows
 ```
 
 ## Concepts
