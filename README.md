@@ -370,6 +370,15 @@ so is any parameter the objective suggests
 that isn't in the declared space,
 unless you pass an `independent_sampler` to opt into sampling it.
 
+### Putting the three together
+
+`examples/optimize_himmelblau_bii.py` runs one study through all three
+samplers in sequence — corners, then a QMC sweep, then TPE — with every
+phase spread across pilot workers and each one warm-starting the next.
+Because the probe phases have already put trials in the study,
+TPE starts modelling on its first trial
+instead of spending `n_startup_trials` on random draws.
+
 ## API reference
 
 Import from the package root:
