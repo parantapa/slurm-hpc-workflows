@@ -470,21 +470,35 @@ Everything for a run lives under the executor's `work_dir`
 | --- | --- |
 | `coordinator.log` | Worker submission and cancellation from the executor's side |
 | `<worker-name>.sh`, `<worker-name>.sbatch` | The generated scripts — read these first when a job dies immediately |
-| `<worker-name>-<jobid>.out` | Slurm's stdout/stderr for the job, including setup-script failures |
-| `<worker-name>-<jobid>-<host>-<pid>.log` | The worker process's own log: task-by-task progress and full tracebacks |
+| `<worker-name>-<jobid>-<task>.out` | One per worker process: setup-script trace, task-by-task progress, full tracebacks |
+| `<worker-name>-<jobid>.out` | The batch job's own output |
 
-The `error_id` inside a `RemoteExecutionError` appears verbatim in the worker
-log next to the traceback — grep for it across the work dir to find the failing
-task's stack.
+Slurm writes those files; the worker process doesn't redirect its own output.
+Which of the two you want depends on how the group was defined:
+
+- **`is_batch_worker=False`** (the default) runs the worker under `srun`, which
+    fans out over every task in the allocation. Each task gets
+    `--output <work-dir>/<worker-name>-%j-%t.out`, so `<task>` is the task's
+    rank — that file is the worker's log. Without the per-task `--output` all
+    of them would interleave into the single batch file.
+    `<worker-name>-<jobid>.out` then holds only what the batch script itself
+    emitted, which in practice means `srun`'s own errors.
+- **`is_batch_worker=True`** runs one worker directly on the batch node, with
+    no `srun` and so no per-task file. Everything lands in
+    `<worker-name>-<jobid>.out`.
+
+The `error_id` inside a `RemoteExecutionError` appears verbatim next to the
+traceback — grep for it across the work dir to find the failing task's stack.
 
 Common failure modes:
 
 - **Tasks never complete, jobs are running.**
     The queue name doesn't match a worker group name,
     or the workers can't reach `ds-service` from the compute nodes.
-    Check the worker's `.log` file.
+    Check the worker's `-<jobid>-<task>.out` file.
 - **Jobs start and exit within seconds.**
-    The setup script failed. Check the `.out` file.
+    The setup script failed. It runs inside the worker script, so its trace is
+    in the same `.out` file as the worker's log — not the batch one.
 - **`ModuleNotFoundError` on a worker.**
     The module isn't importable on the compute node
     — add `python_paths=[...]` or install it into the environment the setup script activates.

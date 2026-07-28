@@ -190,12 +190,17 @@ correctly.
 
 - `is_batch_worker=True` → worker script is sourced directly (single task per
   node); `False` → wrapped in `srun` (fans out across all tasks in the
-  allocation).
+  allocation), with `--output <work_dir>/<name>-%j-%t.out` so each task writes
+  its own file instead of all of them interleaving into the batch job's one.
+  That is why the `worker_sbatch_script` template takes `name` and `work_dir`.
 
 ## Conventions
 
 - Cleanup uses the `Closeable` ABC (`utils.py`) — context-manager +
   `__del__`-based. `SlurmPilotExecutor.close()`/`stop()` cancel all pilot jobs.
 - Logs go to files under a per-run work dir derived from platformdirs
-  (`XDG_*`-driven on clusters; see `docs/rivanna-setup.md`).
+  (`XDG_*`-driven on clusters; see `docs/rivanna-setup.md`). **Slurm** writes
+  the worker files, via `--output` — the worker process does not redirect
+  `sys.stdout`/`sys.stderr`, and `logging.basicConfig` leaves them on the
+  inherited stream. Redirecting them again would leave the Slurm files empty.
 - Version is derived by `setuptools_scm` from git tags (fallback `1.0.0-dev`).

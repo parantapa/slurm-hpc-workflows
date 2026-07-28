@@ -131,38 +131,29 @@ def slurm_pilot_worker(
     slurm_job_id = int(os.environ.get("SLURM_JOB_ID", -1))
     hostname = socket.gethostname()
     pid = os.getpid()
-    log_file = work_dir / f"{name}-{slurm_job_id}-{hostname}-{pid}.log"
 
-    print(f"Redirecting standard output and standard error to {log_file}")
-    sys.stdout.flush()
-    sys.stderr.flush()
+    logging.basicConfig(format=LOG_FORMAT, level=LOG_LEVEL)
 
-    with open(log_file, "wt") as fout:
-        sys.stdout = fout
-        sys.stderr = fout
+    os.environ["PILOT_WORKER_NAME"] = name
+    os.environ["PILOT_WORKER_GROUP"] = group
+    os.environ["DS_SERVER_ADDRESS"] = server_address
 
-        logging.basicConfig(stream=fout, format=LOG_FORMAT, level=LOG_LEVEL)
+    python_paths: list[str] = json.loads(python_paths_json)
+    for path in python_paths:
+        sys.path.insert(0, path)
 
-        os.environ["PILOT_WORKER_NAME"] = name
-        os.environ["PILOT_WORKER_GROUP"] = group
-        os.environ["DS_SERVER_ADDRESS"] = server_address
+    worker = PilotWorkerProcess(
+        group=group,
+        name=name,
+        actor_class_name=actor_class_name,
+        server_address=server_address,
+        work_dir=work_dir,
+        slurm_job_id=slurm_job_id,
+        hostname=hostname,
+        pid=pid,
+    )
 
-        python_paths: list[str] = json.loads(python_paths_json)
-        for path in python_paths:
-            sys.path.insert(0, path)
-
-        worker = PilotWorkerProcess(
-            group=group,
-            name=name,
-            actor_class_name=actor_class_name,
-            server_address=server_address,
-            work_dir=work_dir,
-            slurm_job_id=slurm_job_id,
-            hostname=hostname,
-            pid=pid,
-        )
-
-        try:
-            worker.main()
-        finally:
-            worker.close()
+    try:
+        worker.main()
+    finally:
+        worker.close()

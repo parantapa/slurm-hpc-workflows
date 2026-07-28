@@ -138,7 +138,7 @@ class SlurmPilotExecutor:
             name=name,
             server_address=self.server_address,
             worker_exe=group.worker_exe,
-            work_dir=str(self.work_dir),
+            work_dir=self.work_dir,
             python_paths_json=json.dumps(group.python_paths),
             setup_script=group.setup_script,
             actor_class_name=group.actor_class_name,
@@ -149,6 +149,8 @@ class SlurmPilotExecutor:
 
         worker_sbatch_script = render_template(
             "slurm_pilot:worker_sbatch_script",
+            name=name,
+            work_dir=self.work_dir,
             is_batch_worker=group.is_batch_worker,
             worker_script_path=worker_script_path,
         )

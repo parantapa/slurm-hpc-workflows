@@ -118,6 +118,8 @@ def render_template(
 def render_template(
     template: Literal["slurm_pilot:worker_sbatch_script"],
     *,
+    name: str,
+    work_dir: str | Path,
     is_batch_worker: bool,
     worker_script_path: str | Path,
 ) -> str: ...

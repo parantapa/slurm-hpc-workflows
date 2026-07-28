@@ -30,24 +30,52 @@ class TestLoader:
 
 
 class TestWorkerSbatchScript:
-    def test_batch_worker_sources_script_directly(self):
-        out = render_template(
-            "slurm_pilot:worker_sbatch_script",
-            is_batch_worker=True,
+    def render(self, **overrides):
+        kwargs = dict(
+            name="slurm_pilot_worker.cpu.0",
+            work_dir="/scratch/work",
+            is_batch_worker=False,
             worker_script_path="/path/to/worker.sh",
         )
+        kwargs.update(overrides)
+        return render_template("slurm_pilot:worker_sbatch_script", **kwargs)
+
+    def test_batch_worker_sources_script_directly(self):
+        out = self.render(is_batch_worker=True)
 
         assert ". '/path/to/worker.sh'" in out
         assert "srun" not in out
 
+    def test_batch_worker_leaves_output_to_sbatch(self):
+        """One process, one allocation: the job's own --output already has it."""
+        out = self.render(is_batch_worker=True)
+
+        assert "--output" not in out
+
     def test_non_batch_worker_is_wrapped_in_srun(self):
-        out = render_template(
-            "slurm_pilot:worker_sbatch_script",
-            is_batch_worker=False,
-            worker_script_path="/path/to/worker.sh",
+        out = self.render()
+
+        assert (
+            "srun --output '/scratch/work/slurm_pilot_worker.cpu.0-%j-%t.out' "
+            "/bin/bash '/path/to/worker.sh'" in out
         )
 
-        assert "srun /bin/bash '/path/to/worker.sh'" in out
+    def test_each_srun_task_gets_its_own_output_file(self):
+        """`srun` fans out over every task in the allocation.
+
+        Without a per-task --output they would all interleave into the one
+        batch output file, so the pattern has to carry both the job id and
+        the task id.
+        """
+        out = self.render()
+
+        srun_line = next(ln for ln in out.splitlines() if ln.startswith("srun"))
+        assert "%j" in srun_line and "%t" in srun_line
+
+    def test_the_output_pattern_lands_in_the_work_dir(self):
+        out = self.render(work_dir="/some/other/dir")
+
+        assert "--output '/some/other/dir/" in out
 
 
 class TestWorkerScript:

@@ -308,7 +308,26 @@ class TestScaleWorkers:
             ln for ln in fanout_script.script_text.splitlines() if ln.startswith("srun")
         ]
         assert batch_cmds == []
-        assert len(fanout_cmds) == 1 and fanout_cmds[0].startswith("srun /bin/bash")
+        assert len(fanout_cmds) == 1
+        assert fanout_cmds[0].endswith(".sh'")
+        # Fanned-out tasks each need their own output file, or they all
+        # write into the batch job's single one.
+        assert "--output" in fanout_cmds[0]
+
+    def test_srun_output_files_are_per_task_and_in_the_work_dir(
+        self, executor, fake_slurm, setup_script
+    ):
+        executor.define_worker(name="fanout", sbatch_args=[], setup_script=setup_script)
+
+        executor.scale_workers("fanout", 1)
+
+        (submission,) = fake_slurm.submissions
+        srun_line = next(
+            ln
+            for ln in submission.script_text.splitlines()
+            if ln.startswith("srun")
+        )
+        assert f"--output '{executor.work_dir}/slurm_pilot_worker.fanout.0-%j-%t.out'" in srun_line
 
 
 # --------------------------------------------------------------------------

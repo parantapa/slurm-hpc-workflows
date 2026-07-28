@@ -268,7 +268,7 @@ class TestWorkerIdentity:
 
 
 class TestCli:
-    """The console entry point: log redirection, env vars, sys.path."""
+    """The console entry point: env vars, sys.path, and leaving output alone."""
 
     @pytest.fixture
     def captured(self, monkeypatch):
@@ -289,6 +289,7 @@ class TestCli:
                     )
                 }
                 seen["sys_path_head"] = list(sys.path[:2])
+                seen["streams"] = (sys.stdout, sys.stderr)
 
             def close(self):
                 seen["closed"] = True
@@ -299,11 +300,9 @@ class TestCli:
     def invoke(self, tmp_path: Path, **overrides) -> int:
         """Run the CLI and return its exit code.
 
-        click's CliRunner can't be used here: the command points
-        sys.stdout/sys.stderr at its log file and never restores them, so
-        CliRunner's own `finally: sys.stdout.flush()` hits a closed file.
-        (Harmless in a real worker, which exits straight after.) Invoking the
-        command directly lets us restore the streams ourselves.
+        Invoked directly rather than through click's CliRunner, which swaps
+        the process streams for buffers of its own -- these tests assert on
+        what the command does to those streams, so it must not.
         """
         args = {
             "--group": "cpu",
@@ -316,7 +315,6 @@ class TestCli:
         args.update(overrides)
         argv = [item for pair in args.items() for item in pair]
 
-        saved_out, saved_err = sys.stdout, sys.stderr
         try:
             slurm_pilot_worker.main(
                 args=argv, prog_name="slurm-pilot-worker", standalone_mode=False
@@ -326,8 +324,6 @@ class TestCli:
             return exc.code if isinstance(exc.code, int) else 1
         except click.UsageError as exc:
             return exc.exit_code
-        finally:
-            sys.stdout, sys.stderr = saved_out, saved_err
 
     def test_runs_and_closes_the_worker(self, captured, tmp_path):
         exit_code = self.invoke(tmp_path)
@@ -347,11 +343,25 @@ class TestCli:
 
         assert "/extra/path" in captured["sys_path_head"]
 
-    def test_writes_a_log_file_in_the_work_dir(self, captured, tmp_path):
+    def test_leaves_the_process_streams_alone(self, captured, tmp_path):
+        """Slurm owns the worker's output; the process must not capture it.
+
+        `srun --output` gives every task its own file, so anything the
+        worker prints or logs has to stay on the streams it inherited. A
+        worker that redirected them into a file of its own would leave
+        those Slurm files empty.
+        """
+        before = (sys.stdout, sys.stderr)
+
         self.invoke(tmp_path)
 
-        logs = list(tmp_path.glob("worker-0-*.log"))
-        assert len(logs) == 1
+        assert captured["streams"] == before
+        assert (sys.stdout, sys.stderr) == before
+
+    def test_writes_no_log_file_of_its_own(self, captured, tmp_path):
+        self.invoke(tmp_path)
+
+        assert list(tmp_path.iterdir()) == []
 
     def test_rejects_missing_work_dir(self, captured, tmp_path):
         exit_code = self.invoke(tmp_path, **{"--work-dir": str(tmp_path / "nope")})
