@@ -30,7 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+optuna = ["optuna"]
+test = ["pytest", "optuna"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -5,13 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `slurm-workflows` is a Python library (>=3.12) providing helper utilities to run
-work on Slurm HPC clusters. Its two capabilities:
+work on Slurm HPC clusters. Its three capabilities:
 
 1. **Pilot-job task execution** — a `concurrent.futures`-style executor
    (`SlurmPilotExecutor`) that launches long-lived Slurm "pilot" jobs and
    dispatches Python callables to them via a task queue.
 2. **Jupyter launcher** — the `run-jupyter` CLI submits a Jupyter Lab server as
    a Slurm batch job.
+3. **Optuna storage** — `optuna_storage.py` backs an Optuna study with a
+   ds-service journal, so pilot workers can share one study.
 
 ## Commands
 
@@ -95,6 +97,26 @@ templates delimited by `{#- name: "..." -#}` JSON5 headers, parsed by
 signatures documenting each template's required kwargs — **keep those overloads
 in sync when changing template variables** (the environment uses
 `StrictUndefined`, so a missing var is a hard error).
+
+### Optuna storage (`optuna_storage.py`)
+
+`DsServiceJournalBackend` implements Optuna's `BaseJournalBackend` /
+`BaseJournalSnapshot` on top of the ds-service Journal: one journal key
+(`<prefix>:log`) holds the whole log, and an entry's journal index *is* its
+Optuna log number. Snapshots go in the map under `<prefix>:snapshot`.
+`create_optuna_storage(...)` wraps it in an `optuna.storages.JournalStorage`.
+
+Two things to preserve when changing it:
+
+- **No lock object is needed** (unlike `JournalFileBackend`) — ds-service
+  serializes journal appends and reads server-side.
+- **It must stay picklable.** `__getstate__` drops the `Client` and
+  `_get_client()` reconnects lazily, so a study can be cloudpickled into a
+  task and reconnect on the compute node. That is the whole point of the
+  module; a `Client` held eagerly in `__init__` would break it.
+
+Optuna is an *optional* dependency (`[optuna]` extra) — keep this module out of
+the package `__init__.py` so `import slurm_workflows` works without it.
 
 ### Slurm interaction (`slurm_utils.py`)
 

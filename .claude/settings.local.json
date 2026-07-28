@@ -10,7 +10,11 @@
       "Bash(DS_SERVICE_EXE=/nonexistent PATH=/usr/bin:/bin timeout 300 python -m pytest -q)",
       "Bash(timeout 300 python -m pytest -q)",
       "Bash(git check-ignore *)",
-      "Bash(DS_SERVICE_EXE=/home/appuser/workspace/ds-service/build/Release/ds-service timeout 300 python -m pytest -q)"
+      "Bash(DS_SERVICE_EXE=/home/appuser/workspace/ds-service/build/Release/ds-service timeout 300 python -m pytest -q)",
+      "Bash(python -c \"import ds_service_client; print\\(ds_service_client.__file__\\)\")",
+      "Bash(timeout 180 pip install optuna)",
+      "Bash(python -)",
+      "Read(//home/appuser/.local/lib/python3.14/site-packages/optuna/storages/journal/**)"
     ]
   }
 }

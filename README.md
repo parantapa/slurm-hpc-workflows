@@ -21,6 +21,9 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
     so closures and lambdas work.
 - **Non-fatal remote errors** — an exception on a worker
     doesn't kill the driver script; it comes back as the task's result.
+- **Distributed Optuna** — an [Optuna](https://optuna.org/) storage backend
+    that keeps a study's journal in `ds-service`,
+    so many workers can optimize one study.
 
 ## Requirements
 
@@ -197,10 +200,67 @@ and pass workers a routable host
 `get_address("ib0")` picks that node's Infiniband address,
 falling back to the bind host if the interface isn't there.
 
+## Distributed hyperparameter search with Optuna
+
+`slurm_workflows.optuna_storage` provides an Optuna storage
+whose journal lives in the same `ds-service` server the executor uses,
+so every process pointed at one server and prefix shares one study.
+
+Optuna is an optional dependency:
+
+```sh
+pip install -U slurm-workflows[optuna]
+```
+
+```python
+import optuna
+from slurm_workflows import SlurmPilotExecutor
+from slurm_workflows.optuna_storage import create_optuna_storage
+
+server_address = "10.0.0.1:5051"
+storage = create_optuna_storage(server_address, prefix="lr-search")
+study = optuna.create_study(storage=storage, study_name="lr-search")
+
+
+def run_trials(n_trials):
+    # Runs on a compute node. The storage reconnects there on first use.
+    study.optimize(objective, n_trials=n_trials)
+
+
+executor = SlurmPilotExecutor(server_address=server_address)
+executor.define_worker("gpu", "--partition gpu --gres gpu:1", setup_script)
+executor.scale_workers("gpu", 8)
+
+tasks = [executor.submit("gpu", run_trials, 25) for _ in range(8)]
+executor.wait(tasks)
+
+print(study.best_params)
+```
+
+The study object is cloudpickled to the workers along with the closure;
+what travels is the server address, not the connection,
+so each worker reconnects on its own node.
+Trials from all 8 workers land in one journal,
+and the driver's `study` sees them as soon as it reads the storage again.
+
+`prefix` namespaces the keys a storage owns.
+Use a different prefix for an unrelated search on the same server;
+reuse a prefix to reopen an existing set of studies
+(`optuna.load_study(storage=..., study_name=...)`).
+
+`create_optuna_storage` returns a plain `optuna.storages.JournalStorage`,
+so anything that accepts an Optuna storage — including `optuna-dashboard` —
+works against it.
+For direct access to the backend, use
+`DsServiceJournalBackend` from the same module.
+
 ## API reference
 
 Import from the package root:
 `from slurm_workflows import SlurmPilotExecutor, check_for_error`.
+(The Optuna storage is the exception:
+it lives in `slurm_workflows.optuna_storage`
+so that the package keeps working without Optuna installed.)
 
 ### `SlurmPilotExecutor(server_address, work_dir=None)`
 

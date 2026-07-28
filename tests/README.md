@@ -39,6 +39,7 @@ If none is found, the tests that need a queue **skip** (the template and
 | `test_slurm_utils.py` | `sbatch`/`squeue`/`scancel` wrappers, `get_clean_environ` |
 | `test_executor.py` | `SlurmPilotExecutor`: worker groups, scaling, submit/poll, lifecycle |
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
+| `test_optuna_storage.py` | `DsServiceJournalBackend` and studies through it (skips without Optuna) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |
