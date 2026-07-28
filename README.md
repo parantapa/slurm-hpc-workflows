@@ -23,7 +23,9 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
     doesn't kill the driver script; it comes back as the task's result.
 - **Distributed Optuna** — an [Optuna](https://optuna.org/) storage backend
     that keeps a study's journal in `ds-service`,
-    so many workers can optimize one study.
+    so many workers can optimize one study,
+    plus QMC and corner-sweep samplers that allocate their points atomically
+    instead of racing.
 
 ## Requirements
 
@@ -253,6 +255,120 @@ so anything that accepts an Optuna storage — including `optuna-dashboard` —
 works against it.
 For direct access to the backend, use
 `DsServiceJournalBackend` from the same module.
+
+### Quasi-Monte Carlo search
+
+`optuna.samplers.QMCSampler` is built for shared storage,
+but three details of it misbehave once the workers are separate processes:
+it allocates sequence positions with a non-atomic read-modify-write
+(so concurrent workers evaluate the same point —
+measured at a third to a half of trials with four workers,
+on `RDBStorage` as much as on the journal),
+it needs every worker to be handed the same scramble seed by hand,
+and that shared seed also seeds the random *fallback* sampler,
+making workers duplicate each other's non-QMC draws.
+
+`DsServiceQMCSampler` fixes all three:
+
+```python
+from slurm_workflows.optuna_qmc_sampler import DsServiceQMCSampler
+
+storage = create_optuna_storage(server_address, prefix="tuning")
+study = optuna.create_study(
+    storage=storage,
+    study_name="tuning",
+    load_if_exists=True,          # every worker runs this; first one wins
+    sampler=DsServiceQMCSampler(
+        storage,
+        scramble=True,
+        search_space={            # optional; see below
+            "x": optuna.distributions.FloatDistribution(-10, 10),
+            "lr": optuna.distributions.FloatDistribution(1e-5, 1e-1, log=True),
+        },
+    ),
+)
+```
+
+- Sequence positions come from ds-service's atomic counter —
+    one RPC, incremented under the server's lock,
+    so two workers can never be handed the same one.
+- Workers agree on a scramble seed through the server:
+    the first to start publishes its seed, the rest adopt it.
+    You never pass `seed` unless you want to reproduce a specific run.
+- The fallback sampler is seeded per worker,
+    so a shared scramble seed no longer means identical random draws.
+
+The sampler takes the *storage*, not an address,
+so its counter can't end up on a different server or prefix than the study.
+
+`search_space` is optional but worth giving.
+Without it, Optuna infers the space from the first *finished* trial,
+so every worker that starts before one finishes samples randomly instead
+— with 8 pilot workers that is the first 8 trials.
+Declaring it up front makes trial 0 on every worker already QMC.
+Categorical parameters can't be QMC-sampled;
+leave them out and they go to the independent sampler as usual.
+
+Sobol' (the default) has its lowest discrepancy at n = 2^m,
+so prefer a total trial count that is a power of two.
+
+### Corners of the search space
+
+`ExtremePointSampler` is deterministic:
+given a box of `d` parameters it visits all `2**d` corners,
+one per trial, in a fixed order.
+It's what you run before a real search —
+it bounds the objective's range,
+shows which parameters it's monotone in,
+and finds the corner that makes the code fall over.
+
+```python
+from slurm_workflows.optuna_extreme_point_sampler import ExtremePointSampler
+
+space = {
+    "x": optuna.distributions.FloatDistribution(-10, 10),
+    "lr": optuna.distributions.FloatDistribution(1e-5, 1e-1, log=True),
+    "layers": optuna.distributions.IntDistribution(1, 8),
+}
+storage = create_optuna_storage(server_address, prefix="corners")
+study = optuna.create_study(
+    storage=storage,
+    study_name="corners",
+    load_if_exists=True,
+    sampler=ExtremePointSampler(storage, space),
+)
+study.optimize(objective, n_trials=study.sampler.n_corners)   # 8 corners
+```
+
+Corners are allocated with the same atomic counter the QMC sampler uses,
+so concurrent workers split them exactly —
+no corner twice, none missed —
+and each worker stops itself once the walk is complete,
+so `n_trials` can safely be an overestimate.
+A corner whose worker died is retried
+before any corner is evaluated a second time.
+
+Optuna's `GridSampler` covers the same ground and is fine on a fresh study,
+where it indexes by trial number.
+But once the trial number runs past the grid size —
+a resumed study, retried failures, more trials than points —
+it falls back to scanning for an unvisited point and picking randomly,
+and concurrent workers collide there.
+Measured with four workers on a 32-point grid,
+8 to 13 points were never visited while as many ran twice:
+an exhaustive search that quietly isn't one.
+The counter makes a resumed run no different from a fresh one.
+
+Corner 0 is every parameter at its low,
+and bit *i* of the corner number selects the high of the *i*-th parameter
+(sorted by name).
+That makes corner numbers reproducible,
+but it also means a run stopped early covers a *face* of the box —
+run all `n_corners` trials, or don't read much into the subset.
+Categorical parameters have no extremes and are rejected;
+so is any parameter the objective suggests
+that isn't in the declared space,
+unless you pass an `independent_sampler` to opt into sampling it.
 
 ## API reference
 

@@ -118,6 +118,69 @@ Two things to preserve when changing it:
 Optuna is an *optional* dependency (`[optuna]` extra) — keep this module out of
 the package `__init__.py` so `import slurm_workflows` works without it.
 
+### QMC sampler (`optuna_qmc_sampler.py`)
+
+`DsServiceQMCSampler` subclasses `optuna.samplers.QMCSampler` to make it safe
+distributed. It overrides exactly three things, each fixing a base-class
+behaviour that only bites across processes:
+
+- `_find_sample_id` — the base does a non-atomic read-modify-write on a study
+  system attr, so concurrent workers get the same sequence position. Replaced
+  with `counter_get_next_value` (atomic server-side; returns 1 first, ids are
+  0-based).
+- `before_trial` — negotiates one scramble seed across workers by appending to
+  a journal key and reading entry 0 back (ordered appends ⇒ first writer
+  wins). It must run before any suggestion, because the counter key's digest
+  includes the seed.
+- `infer_relative_search_space` — returns the caller's declared `search_space`
+  so trial 0 is QMC, instead of waiting for the first trial to *finish*.
+
+Also: the independent (fallback) sampler is seeded per worker, deliberately.
+The base passes the QMC `seed` to it, so workers sharing a seed — which the
+base requires for scrambling — draw identical fallback points.
+
+The sampler takes the storage/backend rather than an address so its counter
+cannot land on a different server or prefix than the study. The counter is not
+in the journal, but ds-service is entirely in-memory, so counter and journal
+are lost together and can't diverge.
+
+The tests keep a copy of each base-class misbehaviour (`test_the_base_sampler_*`)
+— if Optuna fixes one upstream, that test fails and the corresponding override
+can be dropped.
+
+### Extreme-point sampler (`optuna_extreme_point_sampler.py`)
+
+`ExtremePointSampler` is a `BaseSampler` (not a subclass — it shares no logic
+with `GridSampler`) that walks the `2**d` corners of a declared box, one per
+trial, deterministically. It follows `GridSampler`'s *shape*: pick the index in
+`before_trial` and record it as a trial system attr, `infer_relative_search_space`
+/ `sample_relative` return `{}`, values are handed out by `sample_independent`
+(the only place the distribution object is available to validate against), and
+`after_trial` calls `study.stop()` when the walk is done.
+
+What differs, and why:
+
+- **Allocation is one `counter_get_next_value`.** `GridSampler` uses the trial
+  number while it can and otherwise scans for an unvisited point and picks
+  randomly; that fallback races, and it *silently skips* points (measured: 8–13
+  of 32 never visited with four workers on a resumed study). The counter has no
+  such path.
+- **Corners are decoded from the index, never materialized** (mixed-radix
+  strides in `_strides`). `GridSampler` builds `itertools.product`, which a
+  60-parameter box would not survive.
+- **`FAIL` is not a visited state.** A corner whose worker died is retried
+  before any corner is repeated. Note a SIGKILLed worker leaves its trial
+  `RUNNING` forever — journal storage has no heartbeat — so that corner is not
+  recovered.
+- **Params outside the declared space raise** unless an `independent_sampler`
+  is passed, since sampling them would break determinism.
+
+Two ordering constraints that are easy to break: `CORNER_ID_ATTR` must be
+written *before* `SPACE_ATTR` (separate journal appends; readers filter on the
+digest, so the digest must arrive last), and `study.stop()` must stay wrapped in
+`try/except RuntimeError` (it is only legal inside an optimize loop, not under
+ask/tell).
+
 ### Slurm interaction (`slurm_utils.py`)
 
 Wraps `sbatch` / `squeue` / `scancel` subprocess calls. Important detail:

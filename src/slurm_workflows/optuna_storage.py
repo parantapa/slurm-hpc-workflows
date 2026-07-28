@@ -216,3 +216,24 @@ def create_optuna_storage(
             read_chunk_size=read_chunk_size,
         )
     )
+
+
+def resolve_backend(storage: Any) -> DsServiceJournalBackend:
+    """Accept either the backend or the storage wrapping it.
+
+    Samplers in this package take the storage the study is using,
+    rather than a server address of their own,
+    so that their keys cannot end up on a different server
+    or under a different prefix than the study they sample for.
+    """
+    if isinstance(storage, DsServiceJournalBackend):
+        return storage
+    if isinstance(storage, JournalStorage):
+        backend = storage._backend
+        if isinstance(backend, DsServiceJournalBackend):
+            return backend
+    raise TypeError(
+        "storage must be a DsServiceJournalBackend, "
+        "or a JournalStorage built on one (as create_optuna_storage returns); "
+        f"got {type(storage).__name__}"
+    )

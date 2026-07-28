@@ -40,6 +40,8 @@ If none is found, the tests that need a queue **skip** (the template and
 | `test_executor.py` | `SlurmPilotExecutor`: worker groups, scaling, submit/poll, lifecycle |
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
 | `test_optuna_storage.py` | `DsServiceJournalBackend` and studies through it (skips without Optuna) |
+| `test_optuna_qmc_sampler.py` | `DsServiceQMCSampler` under concurrent workers (skips without Optuna/scipy) |
+| `test_optuna_extreme_point_sampler.py` | `ExtremePointSampler`: corner enumeration, concurrent allocation |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |
@@ -54,6 +56,17 @@ If none is found, the tests that need a queue **skip** (the template and
   the worker's main loop both run until a condition holds, so a regression
   turns a failing test into a hanging one. An autouse 60s alarm backstops every
   test, and the polling tests use a tighter explicit `time_limit` fixture.
+- **Three tests assert a defect in *Optuna's* samplers.** `test_the_base_
+  sampler_does_repeat_points`, `test_the_base_sampler_draws_them_identically`
+  and `test_grid_sampler_misses_points_in_that_case` guard the premise of the
+  custom samplers' overrides. If Optuna fixes one upstream, that test fails and
+  the matching override should be dropped rather than the test relaxed. All
+  three are timing-dependent (they race four threads); they have been stable
+  over repeated runs, but a lone flake there is the test, not our sampler.
+- **`ExtremePointSampler` overshoots by design.** Workers already mid-trial when
+  the last corner lands still finish it, so a distributed walk can end with up
+  to `WORKERS - 1` extra trials. Tests assert coverage of every corner, not an
+  exact trial count.
 - **Queue name == worker group name.** A task submitted to queue `cpu` is only
   served by workers in group `cpu`; tests rely on this to keep groups isolated.
 - **Don't wait on an RPC to detect server readiness.** A failed first RPC puts
