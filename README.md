@@ -501,6 +501,14 @@ not the continuous proposal.
 modelling everything the earlier calls measured.
 `best_point()` returns the best `(params, value)` seen by either phase.
 
+`examples/optimize_himmelblau_botorch_bii.py` runs the whole thing on a
+cluster, and is worth reading next to `examples/optimize_himmelblau_bii.py`
+— the same objective and the same pilot pool, optimized the Optuna way.
+The Optuna version puts a sampler on every worker and never synchronizes;
+this one keeps the model on the login node
+and ships only the evaluations out,
+so it gains a batch chosen jointly and pays for it with a barrier per round.
+
 ## API reference
 
 Import from the package root:
