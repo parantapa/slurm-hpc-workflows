@@ -5,7 +5,11 @@ pip install -ve .[test]
 pytest
 ```
 
-The whole suite runs in well under a second and needs no Slurm cluster.
+The suite needs no Slurm cluster. Everything except the botorch tests runs in
+well under a second; those add ~10s, almost all of it GP fits.
+
+The `[test]` extra pulls botorch, and so torch — a large download. Without it
+`test_bayes_opt_botorch.py` skips and the rest of the suite still runs.
 
 ## What is real and what is mocked
 
@@ -42,6 +46,7 @@ If none is found, the tests that need a queue **skip** (the template and
 | `test_optuna_storage.py` | `DsServiceJournalBackend` and studies through it (skips without Optuna) |
 | `test_optuna_qmc_sampler.py` | `DsServiceQMCSampler` under concurrent workers (skips without Optuna/scipy) |
 | `test_optuna_extreme_point_sampler.py` | `ExtremePointSampler`: corner enumeration, concurrent allocation |
+| `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, batch split, search behaviour (skips without botorch) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |
@@ -67,6 +72,21 @@ If none is found, the tests that need a queue **skip** (the template and
   the last corner lands still finish it, so a distributed walk can end with up
   to `WORKERS - 1` extra trials. Tests assert coverage of every corner, not an
   exact trial count.
+- **The botorch tests mostly use a stand-in executor.** `LocalExecutor` runs
+  the objective inline. The optimizer's contract with the executor is two calls
+  wide (`submit` returns a `Task`, `wait` fills in its `output`), and a GP fit
+  already dominates each test, so a queue round trip on top would buy nothing.
+  `TestRealExecutor` is what keeps the stand-in honest — it runs a whole
+  optimization through the real executor, the real queue and a real worker (in
+  a thread, since the optimizer blocks in `wait` the moment it submits).
+- **Four botorch tests assert search *behaviour*, not bookkeeping.** They are
+  the ones that catch the objective's sign being flipped — botorch maximizes,
+  the optimizer minimizes. They are stochastic (torch's global RNG is left
+  unseeded, so each run is a fresh sample), and their margins were chosen from
+  measured spreads: the monotone case puts every search point below 0.1 against
+  a 0.5 threshold, and `test_search_beats_random_search` won 12/12 with a 4.6x
+  margin. All four use *unimodal* objectives on purpose — an earlier
+  Himmelblau version of the random-search comparison lost 1 run in 10.
 - **Queue name == worker group name.** A task submitted to queue `cpu` is only
   served by workers in group `cpu`; tests rely on this to keep groups isolated.
 - **Don't wait on an RPC to detect server readiness.** A failed first RPC puts

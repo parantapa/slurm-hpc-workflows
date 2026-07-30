@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `slurm-workflows` is a Python library (>=3.12) providing helper utilities to run
-work on Slurm HPC clusters. Its three capabilities:
+work on Slurm HPC clusters. Its four capabilities:
 
 1. **Pilot-job task execution** — a `concurrent.futures`-style executor
    (`SlurmPilotExecutor`) that launches long-lived Slurm "pilot" jobs and
@@ -14,6 +14,9 @@ work on Slurm HPC clusters. Its three capabilities:
    a Slurm batch job.
 3. **Optuna storage** — `optuna_storage.py` backs an Optuna study with a
    ds-service journal, so pilot workers can share one study.
+4. **Batch Bayesian optimization** — `bayes_opt_botorch.py` fits one GP over
+   all results and proposes a whole batch of points per round, evaluated
+   across the worker pool.
 
 ## Commands
 
@@ -180,6 +183,51 @@ written *before* `SPACE_ATTR` (separate journal appends; readers filter on the
 digest, so the digest must arrive last), and `study.stop()` must stay wrapped in
 `try/except RuntimeError` (it is only legal inside an optimize loop, not under
 ask/tell).
+
+### Batch Bayesian optimization (`bayes_opt_botorch.py`)
+
+`BayesOptBotorch` runs a two-phase optimization over a `SearchSpace`
+(`dict[str, IntRange | FloatRange | CategoricalRange]`):
+`run_exploration_jobs()` evaluates a scrambled Sobol' design in one batch, then
+`run_search_jobs()` loops — fit a `SingleTaskGP` over everything measured, ask
+`optimize_acqf` for a batch, submit, wait. Both phases evaluate through
+`SlurmPilotExecutor.submit`/`wait`, so a round's points run concurrently on the
+pilot pool.
+
+Everything happens in the unit cube: each `ParameterRange` maps its parameter
+into `[0, 1]` (`standardize`) and back (`unstandardize`), which is what lets one
+GP span int, float, log-float and categorical parameters at once. Ranges clamp
+in `unstandardize` because `optimize_acqf` can return a point a hair outside the
+bounds.
+
+Five things to preserve when changing it:
+
+- **botorch maximizes; this minimizes.** The model is fit to `-f` and `best_f`
+  is `max(-v)`, i.e. in that same negated space. This is the easiest thing in
+  the module to get backwards, and it fails quietly — the search just walks
+  uphill. `test_search_moves_toward_the_minimum` is the guard.
+- **`unit_points` holds the point actually evaluated**, re-standardized *after*
+  rounding, never the continuous proposal. Otherwise the GP is told about a
+  location the objective never ran at, which matters as soon as any parameter
+  is an int or a categorical.
+- **The batch split is qLogEI-first**: `num_ei = batch - batch // 2`,
+  `num_pi = batch // 2`, so an odd batch gives the extra point to qLogEI, and a
+  `q == 0` acquisition is skipped (not a legal batch size for `optimize_acqf`).
+- **Exceptions are values here too.** `_evaluate` runs `check_for_error` and
+  raises, rather than letting a `RemoteExecutionError` reach `float()`. It also
+  rejects non-finite objective values, which would silently poison the GP fit.
+- **The exploration count is truncated to a power of two** (Sobol' is only
+  balanced on power-of-two prefixes), and the Sobol' scramble uses the caller's
+  explicit `seed`, so a rerun with the same seed draws the same design. `name`
+  is only used in progress-bar descriptions and error messages.
+
+botorch is an *optional* dependency (`[botorch]` extra) — keep this module out
+of the package `__init__.py`, like `optuna_storage.py`.
+
+`NUM_RESTARTS` / `RAW_SAMPLES` are module-level, and `optimize_acqf` /
+`fit_gpytorch_mll` are called through module globals; the tests monkeypatch
+those to assert the batch split without paying for a real acquisition
+optimization.
 
 ### Slurm interaction (`slurm_utils.py`)
 
