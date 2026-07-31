@@ -1,4 +1,8 @@
-# Tests
+# How to run the tests
+
+[← back to the main README](../README.md)
+
+From the repository root:
 
 ```sh
 pip install -ve .[test]
@@ -13,7 +17,7 @@ The `[test]` extra pulls botorch, and so torch — a large download. Without it
 
 ## What is real and what is mocked
 
-**Slurm is mocked.** `FakeSlurm` (in `conftest.py`) replaces the `subprocess`
+**Slurm is mocked.** `FakeSlurm` (in `tests/conftest.py`) replaces the `subprocess`
 module *inside* `slurm_utils`, intercepting `sbatch` / `squeue` / `scancel`.
 Everything above that boundary is the real code path — script rendering, job-id
 parsing, environment scrubbing — and tests can inspect the scripts that would
@@ -36,6 +40,8 @@ If none is found, the tests that need a queue **skip** (the template and
 `slurm_utils` tests still run).
 
 ## Layout
+
+Paths are relative to [`tests/`](../tests).
 
 | File | Covers |
 | --- | --- |

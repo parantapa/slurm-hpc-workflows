@@ -9,8 +9,9 @@ usage docs: concepts, quick start, actors, `is_batch_worker`, running the
 task-queue server, and troubleshooting. `docs/api-reference.md` lists every
 public name, argument and return type.
 `docs/bayesian-optimization-using-botorch.md` covers the botorch optimizer in
-full. `tests/README.md` covers the suite: what is mocked, what is real, and the
-reasoning behind the trickier tests. This file covers only what those do not.
+full. `docs/howto-run-tests.md` covers the suite: what is mocked, what is real,
+and the reasoning behind the trickier tests. This file covers only what those
+do not.
 
 When adding user-facing documentation, put it in the how-to (or a new doc under
 `docs/` linked from the README's Documentation list) — not in `README.md`.
@@ -25,7 +26,7 @@ Slurm HPC clusters. Alongside the pilot executor and the botorch optimizer the
 ## Commands
 
 There is **no linter config or CI** in this repo. Install and test commands are
-at the top of `tests/README.md`.
+at the top of `docs/howto-run-tests.md`.
 
 `pyproject.toml` defines two console entry points:
 

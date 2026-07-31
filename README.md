@@ -50,6 +50,8 @@ pip install -U slurm-workflows
   `check_for_error`, and the worker environment.
 - **[Batch Bayesian optimization with botorch](docs/bayesian-optimization-using-botorch.md)**
   — the batch Bayesian optimizer that proposes a whole batch of points per round.
+- **[How to run the tests](docs/howto-run-tests.md)** — running the suite, what
+  is mocked and what is real, and notes for changing the tests.
 
 ## License
 
