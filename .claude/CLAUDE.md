@@ -47,8 +47,9 @@ queue:
 - **ds-service** (external `ds-service-client` dependency): a separate task-queue
   server holding tasks keyed by named queues. The coordinator and workers only
   talk to each other through this server's `DsServiceClient` — they never
-  communicate directly. `ds_service.py` can launch a local `ds-service`
-  process, but the server address is passed to the executor explicitly.
+  communicate directly. `DsServiceServer` (also from `ds-service-client`) can
+  launch a local `ds-service` process, but the server address is passed to the
+  executor explicitly.
 - **Pilot workers** (`PilotWorkerProcess` in `slurm_pilot_worker.py`, run inside
   Slurm jobs on compute nodes): loop calling `client.task_get(...)`, execute the
   task, and post results back with `client.task_done(...)`.

@@ -1,6 +1,7 @@
 """Compute PI on Rivanna"""
 
-from slurm_workflows import DsService, SlurmPilotExecutor
+from ds_service_client import DsServiceServer
+from slurm_workflows import SlurmPilotExecutor
 
 SERVER_EXE = "apptainer run /project/bii_nssac/people/pb5gj/shared/ds-service/latest/ds-service.sif"
 
@@ -22,11 +23,10 @@ def do_step_pi(start, stop, step, stepsize):
 
 
 def main():
-    with DsService(server_exe=SERVER_EXE) as ds_service:
-        ds_service.start()
+    with DsServiceServer(ds_service_bin=SERVER_EXE) as ds_service:
         ds_service.wait_until_ready()
 
-        executor = SlurmPilotExecutor(ds_service.get_address("ib0"))
+        executor = SlurmPilotExecutor(ds_service.get_address_by_interface("ib0"))
         executor.define_worker(name="bii", sbatch_args=SBATCH_ARGS)
 
         num_steps = 100_000_000

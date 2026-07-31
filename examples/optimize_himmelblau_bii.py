@@ -29,7 +29,8 @@ import optuna
 from optuna.samplers import TPESampler
 from optuna.distributions import FloatDistribution
 
-from slurm_workflows import DsService, SlurmPilotExecutor, check_for_error
+from ds_service_client import DsServiceServer
+from slurm_workflows import SlurmPilotExecutor, check_for_error
 from slurm_workflows.optuna_storage import create_optuna_storage
 from slurm_workflows.optuna_qmc_sampler import DsServiceQMCSampler
 from slurm_workflows.optuna_extreme_point_sampler import ExtremePointSampler
@@ -140,10 +141,9 @@ def report(study, phase):
 
 
 def main():
-    with DsService(server_exe=SERVER_EXE) as ds_service:
-        ds_service.start()
+    with DsServiceServer(ds_service_bin=SERVER_EXE) as ds_service:
         ds_service.wait_until_ready()
-        address = ds_service.get_address("ib0")
+        address = ds_service.get_address_by_interface("ib0")
 
         # The driver's own handle on the study. Workers open their own
         # against the same address and prefix; the journal is what they

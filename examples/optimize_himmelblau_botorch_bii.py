@@ -6,7 +6,8 @@ Run it from a Rivanna login node (botorch is needed *here*, not on the compute n
     python optimize_himmelblau_botorch_bii.py
 """
 
-from slurm_workflows import DsService, SlurmPilotExecutor
+from ds_service_client import DsServiceServer
+from slurm_workflows import SlurmPilotExecutor
 from slurm_workflows.bayes_opt_botorch import BayesOptBotorch, FloatRange
 
 SERVER_EXE = "apptainer run /project/bii_nssac/people/pb5gj/shared/ds-service/latest/ds-service.sif"
@@ -58,10 +59,9 @@ def report(opt, phase):
 
 
 def main():
-    with DsService(server_exe=SERVER_EXE) as ds_service:
-        ds_service.start()
+    with DsServiceServer(ds_service_bin=SERVER_EXE) as ds_service:
         ds_service.wait_until_ready()
-        address = ds_service.get_address("ib0")
+        address = ds_service.get_address_by_interface("ib0")
 
         executor = SlurmPilotExecutor(address)
         executor.define_worker(name="bii", sbatch_args=SBATCH_ARGS)

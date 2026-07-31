@@ -23,7 +23,6 @@ dependencies = [
     "jinja2",
     "json5",
     "platformdirs",
-    "ifaddr",
     "cloudpickle",
     "typeguard",
     "ds-service-client>=2.1.0"
