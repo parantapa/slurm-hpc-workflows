@@ -3,10 +3,11 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 Read `README.md` first — it documents what the library does and how it is used:
-the executor API, actors, the botorch optimizer, the worker environment, and
-log layout / troubleshooting. `tests/README.md` covers the suite: what is
-mocked, what is real, and the reasoning behind the trickier tests. This file
-covers only what those two do not.
+the executor API, actors, the worker environment, and log layout /
+troubleshooting. `docs/bayesian-optimization-using-botorch.md` covers the
+botorch optimizer in full. `tests/README.md` covers the suite: what is mocked,
+what is real, and the reasoning behind the trickier tests. This file covers
+only what those do not.
 
 ## What this is
 
@@ -24,9 +25,10 @@ at the top of `tests/README.md`.
 
 - `slurm-pilot-worker` — internal; invoked by generated sbatch scripts on
   compute nodes, not by users directly.
-- `run-jupyter --setup-script <path> -- <sbatch args...>` — user-facing. Note the
-  `--setup-script` flag is **required** (the `docs/rivanna-setup.md` walkthrough
-  predates it and omits it).
+- `run-jupyter --setup-script <path> -- <sbatch args...>` — user-facing. The
+  `--setup-script` flag is **required**, and here it really is a path to an
+  existing file (`click.Path(exists=True)`) — unlike `define_worker`'s
+  `setup_script`, which takes the snippet's body.
 
 Deploy to clusters with `cpush` (see `.cpush.json5` for the `rivanna` /
 `ivy-hip-tricr-2` remotes).
