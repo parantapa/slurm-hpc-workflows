@@ -47,6 +47,19 @@ def fail_one(ds_client, queue: str, error_id: str = "ERROR_test") -> str:
     return task.task_id
 
 
+def ghost_task() -> Task:
+    """A task the server has never heard of, so it polls back as `Undefined`."""
+
+    return Task(
+        task_id="does-not-exist",
+        queue=["cpu"],
+        priority=0.0,
+        function=square,
+        input=((), {}),
+        output=NoOutput,
+    )
+
+
 class CountingClient:
     """Counts RPCs so tests can assert on batching."""
 
@@ -134,9 +147,7 @@ class TestDefineWorker:
 
         assert executor.groups["cpu"].python_paths == ["/a"]
 
-    def test_setup_script_body_reaches_the_worker_script(
-        self, executor, fake_slurm, setup_script
-    ):
+    def test_setup_script_body_reaches_the_worker_script(self, executor, setup_script):
         executor.define_worker(name="cpu", sbatch_args=[], setup_script=setup_script)
         executor.scale_workers("cpu", 1)
 
@@ -154,9 +165,7 @@ class TestDefineWorker:
 
         assert executor.groups["cpu"].setup_script == ""
 
-    def test_omitted_setup_script_still_yields_a_runnable_script(
-        self, executor, fake_slurm
-    ):
+    def test_omitted_setup_script_still_yields_a_runnable_script(self, executor):
         executor.define_worker(name="cpu", sbatch_args=[])
         executor.scale_workers("cpu", 1)
 
@@ -319,11 +328,12 @@ class TestScaleWorkers:
 
         (submission,) = fake_slurm.submissions
         srun_line = next(
-            ln
-            for ln in submission.script_text.splitlines()
-            if ln.startswith("srun")
+            ln for ln in submission.script_text.splitlines() if ln.startswith("srun")
         )
-        assert f"--output '{executor.work_dir}/slurm_pilot_worker.fanout.0-%j-%t.out'" in srun_line
+        assert (
+            f"--output '{executor.work_dir}/slurm_pilot_worker.fanout.0-%j-%t.out'"
+            in srun_line
+        )
 
 
 # --------------------------------------------------------------------------
@@ -435,19 +445,18 @@ class TestAsCompleted:
         assert counting.output_calls == 6, "output fetched only for finished tasks"
 
     def test_unknown_task_id_raises(self, executor, time_limit):
-        ghost = Task(
-            task_id="does-not-exist",
-            queue=["cpu"],
-            priority=0.0,
-            function=square,
-            input=((), {}),
-            output=NoOutput,
-        )
-
         # Without Undefined handling this polls forever instead of raising.
         with time_limit(10, "as_completed never terminated for an unknown task"):
             with pytest.raises(RuntimeError, match="unknown to the task queue server"):
-                list(executor.as_completed([ghost]))
+                list(executor.as_completed([ghost_task()]))
+
+    def test_unknown_task_id_raises_from_wait(self, executor, time_limit):
+        # `wait` gets this by delegating to `as_completed`,
+        # so the guarantee is pinned to both entry points
+        # rather than resting on that delegation staying put.
+        with time_limit(10, "wait never terminated for an unknown task"):
+            with pytest.raises(RuntimeError, match="unknown to the task queue server"):
+                executor.wait([ghost_task()])
 
     def test_empty_task_list(self, executor):
         assert list(executor.as_completed([])) == []

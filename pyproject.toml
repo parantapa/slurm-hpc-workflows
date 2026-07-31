@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 botorch = ["botorch"]
 test = ["pytest", "botorch"]
+dev = ["black", "pyright"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -38,6 +39,15 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+# Pinned to the `requires-python` floor so formatting does not drift
+# with whatever Python happens to be running black.
+[tool.black]
+target-version = ["py312"]
+
+[tool.pyright]
+include = ["src", "tests", "examples"]
+pythonVersion = "3.12"
 
 [tool.setuptools_scm]
 fallback_version = "1.0.0-dev"

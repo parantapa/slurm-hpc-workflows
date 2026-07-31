@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Any, Sequence
+from typing import Callable, Any, Mapping, Sequence
 
 import torch
 from botorch.models import SingleTaskGP
@@ -110,7 +110,11 @@ class CategoricalRange:
 
 ParameterRange = IntRange | FloatRange | CategoricalRange
 
-SearchSpace = dict[str, ParameterRange]
+# Mapping, not dict: dict's value type is invariant,
+# so a plain `{"x": FloatRange(...)}` --- inferred as dict[str, FloatRange] ---
+# would not satisfy dict[str, ParameterRange],
+# and every caller would have to annotate its search space.
+SearchSpace = Mapping[str, ParameterRange]
 
 ObjectiveFunction = Callable[..., float]
 

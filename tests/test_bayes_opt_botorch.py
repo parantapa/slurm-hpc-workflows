@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import cast
 
 import pytest
 
@@ -51,11 +52,13 @@ from slurm_workflows.bayes_opt_botorch import (  # noqa: E402
     IntRange,
     floor_power_of_two,
 )
-from slurm_workflows.slurm_pilot_executor import Task  # noqa: E402
+from slurm_workflows.slurm_pilot_executor import (  # noqa: E402
+    SlurmPilotExecutor,
+    Task,
+)
 from slurm_workflows.utils import RemoteExecutionError, gen_error_id  # noqa: E402
 
 from worker_harness import make_worker, run_worker  # noqa: E402
-
 
 # --------------------------------------------------------------------------
 # Test doubles and objectives
@@ -101,6 +104,19 @@ class LocalExecutor:
         return len(self.queues)
 
 
+def as_executor(executor: LocalExecutor) -> SlurmPilotExecutor:
+    """Type the stand-in as the executor it stands in for.
+
+    `LocalExecutor` satisfies the whole contract the optimizer uses
+    --- `submit()` returning a `Task`, `wait()` filling in its `output` ---
+    but does not inherit from `SlurmPilotExecutor`,
+    whose `__init__` would open a real queue connection.
+    The cast is the assertion that the two-call contract is all that is needed;
+    `TestRealExecutor` is what proves it.
+    """
+    return cast(SlurmPilotExecutor, executor)
+
+
 def sphere(x, y):
     """Convex, minimum f = 0 at the origin."""
     return x * x + y * y
@@ -128,7 +144,15 @@ def make_opt(
     space = BOX_2D if space is None else space
     executor = LocalExecutor()
     opt = BayesOptBotorch(
-        "test", space, objective, executor, "cpu", explore, search, parallel, seed,
+        "test",
+        space,
+        objective,
+        as_executor(executor),
+        "cpu",
+        explore,
+        search,
+        parallel,
+        seed,
         **extra,
     )
     return opt, executor
@@ -333,7 +357,7 @@ class TestExploration:
     def test_accepts_a_list_of_queues(self):
         executor = LocalExecutor()
         opt = BayesOptBotorch(
-            "t", BOX_2D, sphere, executor, ["a", "b"], 2, 0, 1, SEED
+            "t", BOX_2D, sphere, as_executor(executor), ["a", "b"], 2, 0, 1, SEED
         )
         opt.run_exploration_jobs()
         assert executor.queues == [["a", "b"]] * 2
@@ -354,8 +378,9 @@ class TestExploration:
             "i": IntRange(2, 9),
             "c": CategoricalRange(3),
         }
-        opt, _ = make_opt(objective=lambda f, l, i, c: f + l + i + c, space=space,
-                          explore=16)
+        opt, _ = make_opt(
+            objective=lambda f, l, i, c: f + l + i + c, space=space, explore=16
+        )
         opt.run_exploration_jobs()
         for p in opt.points:
             assert -5.0 <= p["f"] <= 5.0
@@ -390,10 +415,10 @@ class TestExploration:
         # The seed is the only thing that decides the design.
         # The name is for progress bars and error messages.
         first = BayesOptBotorch(
-            "one", BOX_2D, sphere, LocalExecutor(), "cpu", 8, 0, 1, 7
+            "one", BOX_2D, sphere, as_executor(LocalExecutor()), "cpu", 8, 0, 1, 7
         )
         second = BayesOptBotorch(
-            "two", BOX_2D, sphere, LocalExecutor(), "cpu", 8, 0, 1, 7
+            "two", BOX_2D, sphere, as_executor(LocalExecutor()), "cpu", 8, 0, 1, 7
         )
         first.run_exploration_jobs()
         second.run_exploration_jobs()
@@ -510,7 +535,9 @@ class TestAcquisitionSplit:
         fits = []
         real_fit = bo.fit_gpytorch_mll
         monkeypatch.setattr(
-            bo, "fit_gpytorch_mll", lambda mll, **kw: (fits.append(1), real_fit(mll, **kw))[1]
+            bo,
+            "fit_gpytorch_mll",
+            lambda mll, **kw: (fits.append(1), real_fit(mll, **kw))[1],
         )
         opt, _ = make_opt(explore=4, search=6, parallel=2)
         opt.run_exploration_jobs()
@@ -524,8 +551,11 @@ class TestSearchBehaviour:
     def test_search_moves_toward_the_minimum(self):
         # f(x) = x on [0, 1]: a flipped sign sends every point to 1.0 instead.
         opt, _ = make_opt(
-            objective=identity, space={"x": FloatRange(0.0, 1.0)},
-            explore=4, search=8, parallel=2,
+            objective=identity,
+            space={"x": FloatRange(0.0, 1.0)},
+            explore=4,
+            search=8,
+            parallel=2,
         )
         opt.run_exploration_jobs()
         n_explored = len(opt.points)
@@ -680,7 +710,9 @@ class TestRealExecutor:
     and this is where that assumption meets the real implementation.
     """
 
-    def test_optimizes_through_a_real_worker(self, executor, ds_service_address, tmp_path):
+    def test_optimizes_through_a_real_worker(
+        self, executor, ds_service_address, tmp_path
+    ):
         explore, search, parallel = 4, 4, 2
         total = explore + search
 
@@ -692,9 +724,7 @@ class TestRealExecutor:
         # the optimizer blocks in wait() as soon as it submits,
         # so nothing can play the worker's part after the fact.
         worker = make_worker(ds_service_address, tmp_path / "worker", group="cpu")
-        thread = threading.Thread(
-            target=run_worker, args=(worker, total), daemon=True
-        )
+        thread = threading.Thread(target=run_worker, args=(worker, total), daemon=True)
         thread.start()
         try:
             opt.run_exploration_jobs()
@@ -717,9 +747,7 @@ class TestRealExecutor:
         def boom(x, y):
             raise RuntimeError("worker exploded")
 
-        opt = BayesOptBotorch(
-            "e2e-fail", BOX_2D, boom, executor, "cpu", 2, 0, 1, SEED
-        )
+        opt = BayesOptBotorch("e2e-fail", BOX_2D, boom, executor, "cpu", 2, 0, 1, SEED)
 
         worker = make_worker(ds_service_address, tmp_path / "worker", group="cpu")
         thread = threading.Thread(target=run_worker, args=(worker, 2), daemon=True)

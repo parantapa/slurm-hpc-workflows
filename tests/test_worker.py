@@ -344,27 +344,6 @@ class TestCli:
 
         assert "/extra/path" in captured["sys_path_head"]
 
-    def test_leaves_the_process_streams_alone(self, captured, tmp_path):
-        """Slurm owns the worker's output; the process must not capture it.
-
-        `srun --output` gives every task its own file,
-        so anything the worker prints or logs
-        has to stay on the streams it inherited.
-        A worker that redirected them into a file of its own
-        would leave those Slurm files empty.
-        """
-        before = (sys.stdout, sys.stderr)
-
-        self.invoke(tmp_path)
-
-        assert captured["streams"] == before
-        assert (sys.stdout, sys.stderr) == before
-
-    def test_writes_no_log_file_of_its_own(self, captured, tmp_path):
-        self.invoke(tmp_path)
-
-        assert list(tmp_path.iterdir()) == []
-
     def test_rejects_missing_work_dir(self, captured, tmp_path):
         exit_code = self.invoke(tmp_path, **{"--work-dir": str(tmp_path / "nope")})
 

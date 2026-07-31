@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from ds_service_client import DsServiceClient
 from slurm_workflows.slurm_pilot_worker import PilotWorkerProcess
@@ -62,7 +63,9 @@ def run_worker(worker: PilotWorkerProcess, expect_tasks: int) -> None:
     an empty queue makes `task_get` block until its deadline,
     which would just slow the test down.
     """
-    worker.client = _StoppingClient(worker.client, expect_tasks)
+    # `_StoppingClient` forwards everything it does not override,
+    # so it satisfies the worker's use of the client without subclassing it.
+    worker.client = cast(DsServiceClient, _StoppingClient(worker.client, expect_tasks))
     try:
         worker.main()
     except StopWorker:

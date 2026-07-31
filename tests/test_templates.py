@@ -30,15 +30,23 @@ class TestLoader:
 
 
 class TestWorkerSbatchScript:
-    def render(self, **overrides):
-        kwargs = dict(
-            name="slurm_pilot_worker.cpu.0",
-            work_dir="/scratch/work",
-            is_batch_worker=False,
-            worker_script_path="/path/to/worker.sh",
+    def render(
+        self,
+        name: str = "slurm_pilot_worker.cpu.0",
+        work_dir: str = "/scratch/work",
+        is_batch_worker: bool = False,
+        worker_script_path: str = "/path/to/worker.sh",
+    ) -> str:
+        # Spelled out rather than gathered into `**overrides`:
+        # `render_template` is a set of `@overload`s keyed on the template name,
+        # and a `**kwargs` dict erases the per-argument types they match on.
+        return render_template(
+            "slurm_pilot:worker_sbatch_script",
+            name=name,
+            work_dir=work_dir,
+            is_batch_worker=is_batch_worker,
+            worker_script_path=worker_script_path,
         )
-        kwargs.update(overrides)
-        return render_template("slurm_pilot:worker_sbatch_script", **kwargs)
 
     def test_batch_worker_sources_script_directly(self):
         out = self.render(is_batch_worker=True)
@@ -101,9 +109,7 @@ class TestWorkerScript:
         assert ". 'module load gcc" not in out
 
     def test_multiline_body_is_not_escaped(self):
-        out = self.render(
-            setup_script='export A="x y"\nexport B=$HOME/z\n# a comment'
-        )
+        out = self.render(setup_script='export A="x y"\nexport B=$HOME/z\n# a comment')
 
         assert 'export A="x y"' in out
         assert "export B=$HOME/z" in out

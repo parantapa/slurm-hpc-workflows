@@ -31,8 +31,22 @@ there is a third entry point none of them documents:
 
 ## Commands
 
-There is **no linter config or CI** in this repo.
+There is **no CI** in this repo, so nothing runs these for you.
 Install and test commands are at the top of `docs/howto-run-tests.md`.
+
+```sh
+pip install -ve .[test,dev]
+black src tests examples    # format
+pyright                     # type-check
+pytest                      # test suite
+```
+
+`black` and `pyright` are configured in `pyproject.toml`
+(`[tool.black]` pins `target-version` to the `requires-python` floor
+so formatting does not drift with the running interpreter;
+`[tool.pyright]` sets the include paths and `pythonVersion`),
+so both are run bare — do not pass paths to `pyright`
+or it will ignore that config.
 
 `pyproject.toml` defines two console entry points:
 
@@ -128,6 +142,20 @@ documenting each template's required kwargs
 
 ## Conventions
 
+- **After changing any Python, run `black` then `pyright`, then `pytest`.**
+  All three must be clean before the change is done
+  — `black` reports "left unchanged", `pyright` reports "0 errors",
+  `pytest` passes.
+  Run `black` first: it rewrites lines,
+  so type-checking before formatting can report positions that no longer exist.
+  Neither tool is advisory here.
+  If `pyright` objects to a deliberate test double,
+  say so with a `cast` and a comment explaining why the double is sufficient
+  (see `as_executor` in `tests/test_bayes_opt_botorch.py`)
+  rather than silencing it with a bare `# type: ignore`.
+  If it objects to something in `src/`, prefer fixing the annotation
+  — the `SearchSpace = Mapping[...]` alias exists because `dict[...]`
+  is invariant and made a correct call fail to type-check.
 - **Prose uses semantic line breaks.**
   Break at clause boundaries, not at a column limit:
   start a new line after each sentence,
