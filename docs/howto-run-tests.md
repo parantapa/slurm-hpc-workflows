@@ -35,14 +35,13 @@ rather than a stand-in that can drift from it.
 The server is in-memory,
 so a fresh process per test also means no state leaks between tests.
 
-The binary is located in this order:
+The server is started by `DsServiceServer` from `ds-service-client`,
+which also decides where the binary comes from:
+`$DS_SERVICE_BIN` if it is set, otherwise `ds-service` on `$PATH`.
+`$DS_SERVICE_BIN` may be a whole command line rather than a path
+— `apptainer run ds-service.sif` works as well as `/usr/bin/ds-service`.
 
-1. `$DS_SERVICE_EXE` — if set but missing,
-   the run fails loudly rather than skipping.
-2. `ds-service` on `$PATH`.
-3. `~/workspace/ds-service/build/Release/ds-service`.
-
-If none is found, the tests that need a queue **skip**
+If neither finds it, the tests that need a queue **skip**
 (the template and `slurm_utils` tests still run).
 
 ## Layout
@@ -100,5 +99,11 @@ Paths are relative to [`tests/`](../tests).
   tests rely on this to keep groups isolated.
 - **Don't wait on an RPC to detect server readiness.**
   A failed first RPC puts the gRPC channel into a ~1s reconnect backoff.
-  `conftest` waits on the TCP socket instead;
+  `DsServiceServer.wait_until_ready()` polls the TCP socket instead,
+  which is why `conftest` calls it rather than rolling its own probe;
   doing otherwise makes the suite ~100x slower.
+- **Server lifecycle belongs to `ds-service-client`, not to `conftest`.**
+  Finding the binary, picking a free port, waiting for the socket
+  and terminating the process are all `DsServiceServer`'s job.
+  `conftest` only chooses the host and translates a missing binary
+  into a skip.

@@ -15,12 +15,8 @@ Two deliberate choices here:
 
 from __future__ import annotations
 
-import os
 import sys
-import time
-import shutil
 import signal
-import socket
 import subprocess
 from pathlib import Path
 from typing import Generator
@@ -28,7 +24,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 
 import pytest
-from ds_service_client import DsServiceClient
+from ds_service_client import DsServiceClient, DsServiceServer
 
 from slurm_workflows import slurm_utils
 from slurm_workflows.slurm_pilot_executor import SlurmPilotExecutor
@@ -84,27 +80,6 @@ def _hang_guard():
 # --------------------------------------------------------------------------
 
 
-def find_ds_service_exe() -> str | None:
-    """Locate the ds-service binary, or None if it isn't installed."""
-    from_env = os.environ.get("DS_SERVICE_EXE")
-    if from_env:
-        if not Path(from_env).is_file():
-            pytest.fail(f"DS_SERVICE_EXE points at a missing file: {from_env}")
-        return from_env
-
-    on_path = shutil.which("ds-service")
-    if on_path:
-        return on_path
-
-    return None
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 @pytest.fixture
 def ds_service_address() -> Generator[str]:
     """Run a private ds-service for one test and yield its address.
@@ -112,48 +87,26 @@ def ds_service_address() -> Generator[str]:
     The server is in-memory,
     so a fresh process per test means no state leaks between tests.
     Startup is ~10ms.
+
+    `DsServiceServer` owns finding the binary, picking a free port,
+    waiting for the socket and shutting the process down,
+    so none of that is reimplemented here.
+    Bound to loopback rather than the wildcard address:
+    nothing outside this machine should reach a test's queue.
     """
-    exe = find_ds_service_exe()
-    if exe is None:
+    try:
+        server = DsServiceServer(host="127.0.0.1")
+    except FileNotFoundError:
         pytest.skip(
-            "ds-service executable not found; set DS_SERVICE_EXE to its path "
-            "or put `ds-service` on PATH"
+            "ds-service executable not found; "
+            "put `ds-service` on PATH or point DS_SERVICE_BIN at it"
         )
 
-    port = free_port()
-    address = f"127.0.0.1:{port}"
-    proc = subprocess.Popen(
-        [exe, "--address", address],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    # Wait on the socket, not on an RPC.
-    # a failed first RPC puts the gRPC channel into a ~1s reconnect backoff,
-    # which would dominate test runtime.
-    deadline = time.monotonic() + 10.0
-    while True:
-        if proc.poll() is not None:
-            raise RuntimeError(f"ds-service exited early: {proc.returncode}")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                break
-        except OSError:
-            if time.monotonic() > deadline:
-                proc.kill()
-                raise RuntimeError("ds-service did not become ready in 10s")
-            time.sleep(0.005)
-
     try:
-        yield address
+        server.wait_until_ready(timeout=10)
+        yield server.address
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        server.close()
 
 
 @pytest.fixture
