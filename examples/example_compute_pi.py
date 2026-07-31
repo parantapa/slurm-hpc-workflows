@@ -9,7 +9,8 @@ so that what you are reading is the *mechanism*.
 Run it from a Rivanna or BII login node:
 
     module load apptainer/1.4.5
-    python compute_pi_bii.py
+    pip install slurm-workflows
+    python example_compute_pi.py
 
 Before it will work you need two things.
 
