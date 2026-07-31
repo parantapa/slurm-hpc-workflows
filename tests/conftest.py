@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 
 import pytest
-from ds_service_client import Client
+from ds_service_client import DsServiceClient
 
 from slurm_workflows import slurm_utils
 from slurm_workflows.slurm_pilot_executor import SlurmPilotExecutor
@@ -158,7 +158,7 @@ def ds_service_address() -> Generator[str]:
 @pytest.fixture
 def ds_client(ds_service_address: str):
     """A directly-usable client against the test's ds-service."""
-    client = Client(ds_service_address)
+    client = DsServiceClient(ds_service_address)
     yield client
     client.close()
 

@@ -13,7 +13,7 @@ from typing import Any
 
 import click
 import cloudpickle
-from ds_service_client import Client
+from ds_service_client import DsServiceClient
 
 from .utils import gen_error_id, RemoteExecutionError, LOG_FORMAT, LOG_LEVEL
 
@@ -38,7 +38,7 @@ class PilotWorkerProcess:
 
         self.worker_id = "%s:%s:%s:%s:%s" % (group, name, slurm_job_id, hostname, pid)
         self.logger = logging.getLogger("worker_process")
-        self.client = Client(self.server_address)
+        self.client = DsServiceClient(self.server_address)
 
         self.actor_instance: Any | None
         if actor_class_name == "":

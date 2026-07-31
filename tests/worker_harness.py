@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ds_service_client import Client
+from ds_service_client import DsServiceClient
 from slurm_workflows.slurm_pilot_worker import PilotWorkerProcess
 
 
@@ -18,9 +18,9 @@ class StopWorker(BaseException):
 
 
 class _StoppingClient:
-    """Wraps a real Client, raising StopWorker after N tasks are reported done."""
+    """Wraps a real client, raising StopWorker after N tasks are reported done."""
 
-    def __init__(self, inner: Client, limit: int) -> None:
+    def __init__(self, inner: DsServiceClient, limit: int) -> None:
         self._inner = inner
         self._limit = limit
         self.completed = 0

@@ -16,7 +16,7 @@ import platformdirs
 import cloudpickle
 from typeguard import typechecked
 from tqdm import tqdm
-from ds_service_client import Client, TaskState
+from ds_service_client import DsServiceClient, TaskState
 
 from .slurm_utils import (
     get_running_jobids,
@@ -72,7 +72,7 @@ class SlurmPilotExecutor:
         self.next_task_index = 0
 
         self.server_address = server_address
-        self.client = Client(server_address)
+        self.client = DsServiceClient(server_address)
 
         if work_dir is None:
             now = datetime.now().isoformat()

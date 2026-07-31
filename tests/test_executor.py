@@ -521,7 +521,7 @@ class TestLifecycle:
 
         assert sorted(fake_slurm.cancelled_job_ids) == sorted(job_ids)
         assert executor.num_workers() == 0
-        # Client is still open, so the executor can be reused.
+        # The client is still open, so the executor can be reused.
         assert executor.submit("cpu", square, 2) is not None
 
     def test_close_cancels_all_groups(self, executor, fake_slurm, setup_script):

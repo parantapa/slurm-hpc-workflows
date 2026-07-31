@@ -46,9 +46,9 @@ queue:
   groups, submits/cancels pilot Slurm jobs to scale them, and submits tasks.
 - **ds-service** (external `ds-service-client` dependency): a separate task-queue
   server holding tasks keyed by named queues. The coordinator and workers only
-  talk to each other through this server's `Client` — they never communicate
-  directly. `ds_service.py` can launch a local `ds-service` process, but the
-  server address is passed to the executor explicitly.
+  talk to each other through this server's `DsServiceClient` — they never
+  communicate directly. `ds_service.py` can launch a local `ds-service`
+  process, but the server address is passed to the executor explicitly.
 - **Pilot workers** (`PilotWorkerProcess` in `slurm_pilot_worker.py`, run inside
   Slurm jobs on compute nodes): loop calling `client.task_get(...)`, execute the
   task, and post results back with `client.task_done(...)`.
@@ -113,10 +113,10 @@ Two things to preserve when changing it:
 
 - **No lock object is needed** (unlike `JournalFileBackend`) — ds-service
   serializes journal appends and reads server-side.
-- **It must stay picklable.** `__getstate__` drops the `Client` and
+- **It must stay picklable.** `__getstate__` drops the `DsServiceClient` and
   `_get_client()` reconnects lazily, so a study can be cloudpickled into a
   task and reconnect on the compute node. That is the whole point of the
-  module; a `Client` held eagerly in `__init__` would break it.
+  module; a `DsServiceClient` held eagerly in `__init__` would break it.
 
 Optuna is an *optional* dependency (`[optuna]` extra) — keep this module out of
 the package `__init__.py` so `import slurm_workflows` works without it.

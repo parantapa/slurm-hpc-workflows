@@ -9,7 +9,7 @@ import sys
 import time
 
 import pytest
-from ds_service_client import Client
+from ds_service_client import DsServiceClient
 
 from conftest import find_ds_service_exe, free_port
 from slurm_workflows import ds_service as ds_service_mod
@@ -58,7 +58,7 @@ class TestWaitUntilReady:
         service.wait_until_ready(timeout=10)
 
         # Ready means ready: an RPC must work with no further retrying.
-        client = Client(f"127.0.0.1:{service.port}")
+        client = DsServiceClient(f"127.0.0.1:{service.port}")
         try:
             client.task_get_count_by_state()
         finally:

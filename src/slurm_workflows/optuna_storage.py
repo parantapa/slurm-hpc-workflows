@@ -43,7 +43,7 @@ import logging
 from typing import Any
 from collections.abc import Generator
 
-from ds_service_client import Client
+from ds_service_client import DsServiceClient
 from optuna.storages import JournalStorage
 from optuna.storages.journal import BaseJournalBackend
 
@@ -99,7 +99,7 @@ class DsServiceJournalBackend(BaseJournalBackend, BaseJournalSnapshot, Closeable
         self.timeout = timeout
         self.read_chunk_size = read_chunk_size
 
-        self._client: Client | None = None
+        self._client: DsServiceClient | None = None
 
     @property
     def log_key(self) -> str:
@@ -111,14 +111,14 @@ class DsServiceJournalBackend(BaseJournalBackend, BaseJournalSnapshot, Closeable
         """Map key holding the replay snapshot."""
         return f"{self.prefix}:snapshot"
 
-    def _get_client(self) -> Client:
+    def _get_client(self) -> DsServiceClient:
         """Connect on first use.
 
         The grpc channel does not survive pickling; the address does.
         """
         if self._client is None:
             kwargs = {} if self.timeout is None else {"timeout": self.timeout}
-            self._client = Client(self.server_address, **kwargs)
+            self._client = DsServiceClient(self.server_address, **kwargs)
         return self._client
 
     def __getstate__(self) -> dict[str, Any]:
