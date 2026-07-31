@@ -63,9 +63,9 @@ class TestWorkerSbatchScript:
     def test_each_srun_task_gets_its_own_output_file(self):
         """`srun` fans out over every task in the allocation.
 
-        Without a per-task --output they would all interleave into the one
-        batch output file, so the pattern has to carry both the job id and
-        the task id.
+        Without a per-task --output
+        they would all interleave into the one batch output file,
+        so the pattern has to carry both the job id and the task id.
         """
         out = self.render()
 

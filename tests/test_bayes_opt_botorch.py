@@ -65,10 +65,11 @@ from worker_harness import make_worker, run_worker  # noqa: E402
 class LocalExecutor:
     """Stands in for SlurmPilotExecutor, running each callable inline.
 
-    Records what it was asked to submit so tests can assert on the queue and
-    on the keyword arguments the objective was called with. A raising
-    objective comes back as a `RemoteExecutionError` output, exactly as a real
-    worker reports it.
+    Records what it was asked to submit
+    so tests can assert on the queue
+    and on the keyword arguments the objective was called with.
+    A raising objective comes back as a `RemoteExecutionError` output,
+    exactly as a real worker reports it.
     """
 
     def __init__(self) -> None:
@@ -121,8 +122,8 @@ def make_opt(
 ):
     """An optimizer wired to a fresh LocalExecutor.
 
-    `seed` is named explicitly so it is not swallowed by `**extra`, which goes
-    to the objective.
+    `seed` is named explicitly
+    so it is not swallowed by `**extra`, which goes to the objective.
     """
     space = BOX_2D if space is None else space
     executor = LocalExecutor()
@@ -152,8 +153,8 @@ class TestIntRange:
             assert r.unstandardize(r.standardize(x)) == x
 
     def test_returns_an_int_not_a_float(self):
-        # The value is handed to the objective as a keyword argument; a 3.0
-        # where the objective expects 3 is a bug the caller has to debug.
+        # The value is handed to the objective as a keyword argument;
+        # a 3.0 where the objective expects 3 is a bug the caller has to debug.
         value = IntRange(0, 10).unstandardize(0.5)
         assert isinstance(value, int)
 
@@ -189,8 +190,9 @@ class TestFloatRange:
             assert math.isclose(r.standardize(r.unstandardize(y)), y)
 
     def test_log_range_midpoint_is_the_geometric_mean(self):
-        # The point of log_range: half the budget goes to each decade, not to
-        # each half of the interval.
+        # The point of log_range:
+        # half the budget goes to each decade,
+        # not to each half of the interval.
         r = FloatRange(1e-4, 1e-1, log_range=True)
         assert math.isclose(r.unstandardize(0.5), math.sqrt(1e-4 * 1e-1))
         assert math.isclose(r.unstandardize(1 / 3), 1e-3)
@@ -299,8 +301,8 @@ class TestConstruction:
             make_opt(parallel=0)
 
     def test_rejects_extra_kwargs_that_shadow_a_parameter(self):
-        # Silently overriding a searched parameter would make the recorded
-        # point and the evaluated point disagree.
+        # Silently overriding a searched parameter
+        # would make the recorded point and the evaluated point disagree.
         with pytest.raises(ValueError, match="shadow"):
             make_opt(x=1.0)
 
@@ -362,8 +364,8 @@ class TestExploration:
             assert isinstance(p["c"], int) and p["c"] in (0, 1, 2)
 
     def test_the_design_covers_the_box(self):
-        # A Sobol' design, not 16 draws at one spot: every axis should have
-        # points in both halves.
+        # A Sobol' design, not 16 draws at one spot:
+        # every axis should have points in both halves.
         opt, _ = make_opt(explore=16)
         opt.run_exploration_jobs()
         for name in ("x", "y"):
@@ -385,8 +387,8 @@ class TestExploration:
         assert first.points != second.points
 
     def test_the_design_does_not_depend_on_the_job_name(self):
-        # The seed is the only thing that decides the design. The name is for
-        # progress bars and error messages.
+        # The seed is the only thing that decides the design.
+        # The name is for progress bars and error messages.
         first = BayesOptBotorch(
             "one", BOX_2D, sphere, LocalExecutor(), "cpu", 8, 0, 1, 7
         )
@@ -402,8 +404,9 @@ class TestExploration:
         assert opt.seed == 1234
 
     def test_recorded_coordinates_are_the_point_actually_evaluated(self):
-        # An integer parameter rounds; the model must be told where the
-        # objective really ran, not where the continuous proposal landed.
+        # An integer parameter rounds;
+        # the model must be told where the objective really ran,
+        # not where the continuous proposal landed.
         space = {"i": IntRange(0, 4)}
         opt, _ = make_opt(objective=lambda i: float(i), space=space, explore=8)
         opt.run_exploration_jobs()
@@ -543,8 +546,9 @@ class TestSearchBehaviour:
 
     def test_search_beats_random_search(self):
         # Sobol' alone over the same total budget is the thing BO has to beat.
-        # A unimodal objective deliberately: on a multimodal one this margin
-        # closes at these budgets and the test starts flaking.
+        # A unimodal objective deliberately:
+        # on a multimodal one this margin closes at these budgets
+        # and the test starts flaking.
         opt, _ = make_opt(objective=sphere, explore=8, search=16, parallel=4)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
@@ -556,9 +560,10 @@ class TestSearchBehaviour:
         assert guided < blind.best_point()[1]
 
     def test_a_mixed_space_optimizes(self):
-        # Float, integer and categorical in one space. The categorical offsets
-        # are large, so picking the wrong category cannot look like a good
-        # point however well the continuous part is tuned.
+        # Float, integer and categorical in one space.
+        # The categorical offsets are large,
+        # so picking the wrong category cannot look like a good point
+        # however well the continuous part is tuned.
         offsets = [0.0, 10.0, 25.0]
 
         def objective(x, y, cat):
@@ -669,9 +674,10 @@ class TestBestPoint:
 class TestRealExecutor:
     """One end-to-end run against the real queue, executor and worker.
 
-    This is what keeps `LocalExecutor` honest --- everything above assumes
-    `submit()` returns a Task whose `output` `wait()` fills in, and this is
-    where that assumption meets the real implementation.
+    This is what keeps `LocalExecutor` honest
+    --- everything above assumes `submit()` returns a Task
+    whose `output` `wait()` fills in,
+    and this is where that assumption meets the real implementation.
     """
 
     def test_optimizes_through_a_real_worker(self, executor, ds_service_address, tmp_path):
@@ -682,8 +688,9 @@ class TestRealExecutor:
             "e2e", BOX_2D, sphere, executor, "cpu", explore, search, parallel, SEED
         )
 
-        # A real worker in a thread: the optimizer blocks in wait() as soon as
-        # it submits, so nothing can play the worker's part after the fact.
+        # A real worker in a thread:
+        # the optimizer blocks in wait() as soon as it submits,
+        # so nothing can play the worker's part after the fact.
         worker = make_worker(ds_service_address, tmp_path / "worker", group="cpu")
         thread = threading.Thread(
             target=run_worker, args=(worker, total), daemon=True

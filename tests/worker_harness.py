@@ -11,9 +11,9 @@ from slurm_workflows.slurm_pilot_worker import PilotWorkerProcess
 class StopWorker(BaseException):
     """Breaks the worker's otherwise-infinite main loop.
 
-    Deliberately a BaseException, not an Exception: `main()` catches every
-    Exception so a worker survives bad tasks, so only a BaseException can end
-    the loop from inside a client call.
+    Deliberately a BaseException, not an Exception:
+    `main()` catches every Exception so a worker survives bad tasks,
+    so only a BaseException can end the loop from inside a client call.
     """
 
 
@@ -58,8 +58,9 @@ def make_worker(
 def run_worker(worker: PilotWorkerProcess, expect_tasks: int) -> None:
     """Run the worker's real main loop until `expect_tasks` are completed.
 
-    Tasks must already be queued: an empty queue makes `task_get` block until
-    its deadline, which would just slow the test down.
+    Tasks must already be queued:
+    an empty queue makes `task_get` block until its deadline,
+    which would just slow the test down.
     """
     worker.client = _StoppingClient(worker.client, expect_tasks)
     try:

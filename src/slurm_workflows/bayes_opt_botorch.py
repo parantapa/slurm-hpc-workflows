@@ -16,8 +16,9 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from .slurm_pilot_executor import SlurmPilotExecutor, check_for_error
 
-# Botorch recommendation: single precision makes the GP fits
-# and the acquisition optimization numerically fragile.
+# Botorch recommendation:
+# single precision makes the GP fits and the acquisition optimization
+# numerically fragile.
 DTYPE = torch.double
 
 # Multi-start settings for `optimize_acqf`.

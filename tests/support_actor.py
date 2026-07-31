@@ -1,7 +1,8 @@
 """Actor classes for the actor tests.
 
-Workers resolve actors with `importlib`, so these must be importable by name
-(`support_actor.CounterActor`). conftest puts this directory on `sys.path`.
+Workers resolve actors with `importlib`,
+so these must be importable by name (`support_actor.CounterActor`).
+conftest puts this directory on `sys.path`.
 """
 
 from __future__ import annotations

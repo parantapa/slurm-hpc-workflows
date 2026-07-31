@@ -92,8 +92,8 @@ so a round spends part of its budget refining the current best.
 Both phases block until every point in flight has come back.
 A worker that raises does not raise on the driver —
 so both phases run `check_for_error` themselves
-and raise a `RuntimeError` rather than feeding a
-`RemoteExecutionError` into the model.
+and raise a `RuntimeError`
+rather than feeding a `RemoteExecutionError` into the model.
 An objective returning `NaN` or `inf` is rejected the same way,
 since either one silently poisons the GP fit.
 
@@ -114,8 +114,9 @@ expect the search to re-evaluate points it has already seen.
 The model records where the objective *actually* ran, after rounding,
 not the continuous proposal.
 
-`run_search_jobs` needs something to model, so it raises unless points have
-already been evaluated — call `run_exploration_jobs` first.
+`run_search_jobs` needs something to model,
+so it raises unless points have already been evaluated
+— call `run_exploration_jobs` first.
 It can then be called again to spend another `num_search_points`,
 modelling everything the earlier calls measured.
 `best_point()` returns the best `(params, value)` seen by either phase,

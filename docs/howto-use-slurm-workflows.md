@@ -2,8 +2,9 @@
 
 [← back to the main README](../README.md)
 
-This is the user guide for `slurm-workflows`. For what the package is and
-how to install it, see the [README](../README.md).
+This is the user guide for `slurm-workflows`.
+For what the package is and how to install it,
+see the [README](../README.md).
 
 ## Concepts
 
@@ -177,18 +178,19 @@ sets how the server is started, and may be a whole command line
 
 ## Batch Bayesian optimization with botorch
 
-The package ships a botorch optimizer that fits one Gaussian process to
-everything measured so far and proposes a whole batch of points per round,
-evaluated across the worker pool — so a round's points run concurrently on the
-pilot pool described above.
+The package ships a botorch optimizer
+that fits one Gaussian process to everything measured so far
+and proposes a whole batch of points per round,
+evaluated across the worker pool
+— so a round's points run concurrently on the pilot pool described above.
 
 It has its own guide:
 **[Batch Bayesian optimization with botorch](bayesian-optimization-using-botorch.md)**.
 
 ## API reference
 
-Every public name, argument and return type is listed in the
-**[API reference](api-reference.md)**.
+Every public name, argument and return type
+is listed in the **[API reference](api-reference.md)**.
 
 ## Logs and troubleshooting
 
@@ -205,19 +207,22 @@ Everything for a run lives under the executor's `work_dir`
 Slurm writes those files; the worker process doesn't redirect its own output.
 Which of the two you want depends on how the group was defined:
 
-- **`is_batch_worker=False`** (the default) runs the worker under `srun`, which
-    fans out over every task in the allocation. Each task gets
-    `--output <work-dir>/<worker-name>-%j-%t.out`, so `<task>` is the task's
-    rank — that file is the worker's log. Without the per-task `--output` all
-    of them would interleave into the single batch file.
-    `<worker-name>-<jobid>.out` then holds only what the batch script itself
-    emitted, which in practice means `srun`'s own errors.
-- **`is_batch_worker=True`** runs one worker directly on the batch node, with
-    no `srun` and so no per-task file. Everything lands in
-    `<worker-name>-<jobid>.out`.
+- **`is_batch_worker=False`** (the default) runs the worker under `srun`,
+    which fans out over every task in the allocation.
+    Each task gets `--output <work-dir>/<worker-name>-%j-%t.out`,
+    so `<task>` is the task's rank — that file is the worker's log.
+    Without the per-task `--output`
+    all of them would interleave into the single batch file.
+    `<worker-name>-<jobid>.out` then holds
+    only what the batch script itself emitted,
+    which in practice means `srun`'s own errors.
+- **`is_batch_worker=True`** runs one worker directly on the batch node,
+    with no `srun` and so no per-task file.
+    Everything lands in `<worker-name>-<jobid>.out`.
 
-The `error_id` inside a `RemoteExecutionError` appears verbatim next to the
-traceback — grep for it across the work dir to find the failing task's stack.
+The `error_id` inside a `RemoteExecutionError`
+appears verbatim next to the traceback
+— grep for it across the work dir to find the failing task's stack.
 
 Common failure modes:
 
@@ -226,8 +231,11 @@ Common failure modes:
     or the workers can't reach `ds-service` from the compute nodes.
     Check the worker's `-<jobid>-<task>.out` file.
 - **Jobs start and exit within seconds.**
-    The setup script failed. It runs inside the worker script, so its trace is
-    in the same `.out` file as the worker's log — not the batch one.
+    The setup script failed.
+    It runs inside the worker script,
+    so its trace is in the same `.out` file as the worker's log
+    — not the batch one.
 - **`ModuleNotFoundError` on a worker.**
     The module isn't importable on the compute node
-    — add `python_paths=[...]` or install it into the environment the setup script activates.
+    — add `python_paths=[...]`
+    or install it into the environment the setup script activates.

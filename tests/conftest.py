@@ -33,8 +33,9 @@ from ds_service_client import DsServiceClient
 from slurm_workflows import slurm_utils
 from slurm_workflows.slurm_pilot_executor import SlurmPilotExecutor
 
-# Test-support modules (e.g. support_actor) must be importable by name, both
-# for `import` here and for the worker's importlib-based actor lookup.
+# Test-support modules (e.g. support_actor) must be importable by name,
+# both for `import` here
+# and for the worker's importlib-based actor lookup.
 sys.path.insert(0, str(Path(__file__).parent))
 
 
@@ -108,8 +109,8 @@ def free_port() -> int:
 def ds_service_address() -> Generator[str]:
     """Run a private ds-service for one test and yield its address.
 
-    The server is in-memory, so a fresh process per test means
-    no state leaks between tests.
+    The server is in-memory,
+    so a fresh process per test means no state leaks between tests.
     Startup is ~10ms.
     """
     exe = find_ds_service_exe()
@@ -201,8 +202,9 @@ class Submission:
 class FakeSlurm:
     """Stands in for the `subprocess` module inside `slurm_utils`.
 
-    Implements just `run()` for the three Slurm commands and delegates
-    everything else (exception types, etc.) to the real `subprocess`.
+    Implements just `run()` for the three Slurm commands
+    and delegates everything else (exception types, etc.)
+    to the real `subprocess`.
     """
 
     def __init__(self) -> None:

@@ -310,8 +310,8 @@ class TestScaleWorkers:
         assert batch_cmds == []
         assert len(fanout_cmds) == 1
         assert fanout_cmds[0].endswith(".sh'")
-        # Fanned-out tasks each need their own output file, or they all
-        # write into the batch job's single one.
+        # Fanned-out tasks each need their own output file,
+        # or they all write into the batch job's single one.
         assert "--output" in fanout_cmds[0]
 
     def test_srun_output_files_are_per_task_and_in_the_work_dir(

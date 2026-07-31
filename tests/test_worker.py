@@ -300,9 +300,10 @@ class TestCli:
     def invoke(self, tmp_path: Path, **overrides) -> int:
         """Run the CLI and return its exit code.
 
-        Invoked directly rather than through click's CliRunner, which swaps
-        the process streams for buffers of its own -- these tests assert on
-        what the command does to those streams, so it must not.
+        Invoked directly rather than through click's CliRunner,
+        which swaps the process streams for buffers of its own
+        -- these tests assert on what the command does to those streams,
+        so it must not.
         """
         args = {
             "--group": "cpu",
@@ -346,10 +347,11 @@ class TestCli:
     def test_leaves_the_process_streams_alone(self, captured, tmp_path):
         """Slurm owns the worker's output; the process must not capture it.
 
-        `srun --output` gives every task its own file, so anything the
-        worker prints or logs has to stay on the streams it inherited. A
-        worker that redirected them into a file of its own would leave
-        those Slurm files empty.
+        `srun --output` gives every task its own file,
+        so anything the worker prints or logs
+        has to stay on the streams it inherited.
+        A worker that redirected them into a file of its own
+        would leave those Slurm files empty.
         """
         before = (sys.stdout, sys.stderr)
 
