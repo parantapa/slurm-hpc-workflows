@@ -14,11 +14,7 @@ from pathlib import Path
 
 import pytest
 import cloudpickle
-
-try:  # typeguard >= 3
-    from typeguard import TypeCheckError
-except ImportError:  # typeguard 2.x raises plain TypeError
-    TypeCheckError = TypeError  # type: ignore[misc,assignment]
+from typeguard import TypeCheckError
 
 from slurm_workflows import check_for_error
 from slurm_workflows.slurm_pilot_executor import (

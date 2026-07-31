@@ -24,7 +24,7 @@ dependencies = [
     "json5",
     "platformdirs",
     "cloudpickle",
-    "typeguard",
+    "typeguard>=3",
     "ds-service-client>=2.1.0"
 ]
 
