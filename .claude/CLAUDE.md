@@ -2,18 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Read `README.md` first — it documents what the library does and how it is used:
-the executor API, actors, the worker environment, and log layout /
-troubleshooting. `docs/bayesian-optimization-using-botorch.md` covers the
-botorch optimizer in full. `tests/README.md` covers the suite: what is mocked,
-what is real, and the reasoning behind the trickier tests. This file covers
-only what those do not.
+All user documentation lives under `docs/`, not in `README.md` — the README is
+a landing page (what the library is, requirements, install, links).
+`docs/howto-use-slurm-workflows.md` is the user guide and the single home for
+usage docs: concepts, quick start, actors, `is_batch_worker`, running the
+task-queue server, and troubleshooting. `docs/api-reference.md` lists every
+public name, argument and return type.
+`docs/bayesian-optimization-using-botorch.md` covers the botorch optimizer in
+full. `tests/README.md` covers the suite: what is mocked, what is real, and the
+reasoning behind the trickier tests. This file covers only what those do not.
+
+When adding user-facing documentation, put it in the how-to (or a new doc under
+`docs/` linked from the README's Documentation list) — not in `README.md`.
 
 ## What this is
 
 `slurm-workflows` is a Python library (>=3.12) of helpers for running work on
-Slurm HPC clusters. Alongside the pilot executor and the botorch optimizer that
-`README.md` describes, there is a third entry point neither README mentions:
+Slurm HPC clusters. Alongside the pilot executor and the botorch optimizer the
+`docs/` guides describe, there is a third entry point none of them documents:
 **`run-jupyter`**, a CLI that submits a Jupyter Lab server as a Slurm batch job.
 
 ## Commands
