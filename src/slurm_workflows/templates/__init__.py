@@ -96,15 +96,6 @@ _ENVIRONMENT = jinja2.Environment(
 
 @overload
 def render_template(
-    template: Literal["run_jupyter:script_template"],
-    *,
-    setup_script: str | Path,
-    jupyter_executable: str | Path,
-) -> str: ...
-
-
-@overload
-def render_template(
     template: Literal["slurm_utils:script_template"],
     *,
     name: str,

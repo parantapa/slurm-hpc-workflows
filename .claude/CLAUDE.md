@@ -25,9 +25,8 @@ put it in the how-to
 
 `slurm-workflows` is a Python library (>=3.12)
 of helpers for running work on Slurm HPC clusters.
-Alongside the pilot executor and the botorch optimizer the `docs/` guides describe,
-there is a third entry point none of them documents:
-**`run-jupyter`**, a CLI that submits a Jupyter Lab server as a Slurm batch job.
+It does two things, both covered by the `docs/` guides:
+the pilot-job executor and the batch Bayesian optimizer built on it.
 
 ## Commands
 
@@ -48,16 +47,9 @@ so formatting does not drift with the running interpreter;
 so both are run bare — do not pass paths to `pyright`
 or it will ignore that config.
 
-`pyproject.toml` defines two console entry points:
-
-- `slurm-pilot-worker` — internal;
-  invoked by generated sbatch scripts on compute nodes,
-  not by users directly.
-- `run-jupyter --setup-script <path> -- <sbatch args...>` — user-facing.
-  The `--setup-script` flag is **required**,
-  and here it really is a path to an existing file (`click.Path(exists=True)`)
-  — unlike `define_worker`'s `setup_script`,
-  which takes the snippet's body.
+`pyproject.toml` defines one console entry point, `slurm-pilot-worker`.
+It is internal: generated sbatch scripts invoke it on the compute nodes,
+users never call it directly.
 
 Deploy to clusters with `cpush`
 (see `.cpush.json5` for the `rivanna` / `ivy-hip-tricr-2` remotes).

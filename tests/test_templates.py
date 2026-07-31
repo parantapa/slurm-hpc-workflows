@@ -171,17 +171,3 @@ class TestSbatchScriptTemplate:
         )
 
         assert out.count("#SBATCH") == 2  # job-name and output only
-
-
-class TestJupyterScript:
-    def test_renders_launch_command(self):
-        out = render_template(
-            "run_jupyter:script_template",
-            setup_script="/home/me/setup.sh",
-            jupyter_executable="jupyter",
-        )
-
-        assert ". '/home/me/setup.sh'" in out
-        assert "'jupyter' lab" in out
-        assert '--ip "$HOST" --port "$PORT"' in out
-        assert "--no-browser" in out

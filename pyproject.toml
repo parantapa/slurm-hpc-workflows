@@ -56,5 +56,4 @@ fallback_version = "1.0.0-dev"
 "Homepage" = "https://github.com/parantapa/slurm-hpc-workflows"
 
 [project.scripts]
-"run-jupyter" = "slurm_workflows.run_jupyter:run_jupyter"
 "slurm-pilot-worker" = "slurm_workflows.slurm_pilot_worker:slurm_pilot_worker"
