@@ -154,7 +154,7 @@ executor.wait(tasks)
 ```
 
 The class must be importable on the compute node.
-By default the executors's current working directory
+By default the executor's current working directory
 is added to the workers' `sys.path`; add more with `python_paths=[...]`.
 
 ### One worker per job, or one per task
@@ -286,8 +286,9 @@ The design is scrambled with the `seed` you pass,
 so a rerun with the same seed explores the same points
 and a second run with a different seed explores fresh ones.
 All arguments up to and including the seed are positional-only,
-which is what keeps `**extra_objective_kwargs`
-free to use any name your objective wants.
+which is what frees `**extra_objective_kwargs`
+to use the optimizer's own parameter names.
+They may not shadow a key of `space`, which is rejected up front.
 
 `run_search_jobs` then loops until its budget is spent. Each round:
 fit a `SingleTaskGP` to every point measured so far,
@@ -324,9 +325,12 @@ expect the search to re-evaluate points it has already seen.
 The model records where the objective *actually* ran, after rounding,
 not the continuous proposal.
 
-`run_search_jobs` can be called again to spend another `num_search_points`,
+`run_search_jobs` needs something to model, so it raises unless points have
+already been evaluated — call `run_exploration_jobs` first.
+It can then be called again to spend another `num_search_points`,
 modelling everything the earlier calls measured.
-`best_point()` returns the best `(params, value)` seen by either phase.
+`best_point()` returns the best `(params, value)` seen by either phase,
+and raises if nothing has been evaluated yet.
 
 `examples/optimize_himmelblau_botorch_bii.py` runs the whole thing on a
 cluster. The model stays on the login node
@@ -362,7 +366,7 @@ Remaining `define_worker` options:
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
-| `setup_script` | `None` | Shell snippet run on the compute node before the worker starts — the text, not a path. Omit it if `/etc/profile` (always sourced) already gives workers the right environment. |
+| `setup_script` | `""` | Shell snippet run on the compute node before the worker starts — the text, not a path. Must be a `str`; omit it (or pass `""`) if `/etc/profile` (always sourced) already gives workers the right environment. |
 | `is_batch_worker` | `False` | See [above](#one-worker-per-job-or-one-per-task). |
 | `actor_class_name` | `None` | Fully qualified class name to instantiate once per worker. |
 | `python_paths` | `None` | Extra paths prepended to the workers' `sys.path`. |
@@ -410,7 +414,7 @@ Two details worth knowing:
  and returns a `RemoteExecutionError` as the task's `output`.
  Always run `check_for_error` over a completed batch.
 - **Submitting from inside a job works.** `sbatch` is invoked
-    with all `SLURM_*` / `PMI_*` / `SRUN_*` variables
+    with all `SLURM_*` / `SLURMD_*` / `PMI_*` / `SRUN_*` variables
     stripped from the environment,
     so a coordinator running inside a Slurm allocation
     can still submit pilot jobs.
