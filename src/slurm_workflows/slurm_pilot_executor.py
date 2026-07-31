@@ -371,6 +371,16 @@ class SlurmPilotExecutor:
         for group in self.groups.values():
             group.workers.clear()
 
+    def __enter__(self) -> "SlurmPilotExecutor":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        # Returning None (not False-y-by-accident, but explicitly nothing)
+        # so an exception raised in the body still propagates:
+        # pilot jobs are cancelled on the way out either way,
+        # but a failure in the body must not be swallowed.
+        self.close()
+
 
 def check_for_error(tasks: list[Task], verbose: bool = True) -> list[Task]:
     ret = []

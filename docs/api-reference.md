@@ -25,6 +25,22 @@ so that the package keeps working without botorch installed.)
 | `stop()` | Cancel all pilot jobs, keep the executor usable. |
 | `close()` | Cancel all pilot jobs and close the queue-server connection. |
 
+It is also a context manager,
+which is the easiest way to be sure pilot jobs are cancelled
+even if the block raises:
+
+```python
+with SlurmPilotExecutor(server_address=address) as executor:
+    executor.define_worker(name="cpu", sbatch_args=[...])
+    executor.scale_workers("cpu", 4)
+    ...
+# close() has run: every pilot job is cancelled
+# and the queue connection is shut.
+```
+
+Leaving the block calls `close()`, so the executor is spent afterwards.
+An exception raised inside the block still propagates.
+
 Remaining `define_worker` options:
 
 | Argument | Default | Meaning |

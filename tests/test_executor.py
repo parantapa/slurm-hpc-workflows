@@ -555,3 +555,29 @@ class TestLifecycle:
 
         executor.close()
         executor.close()  # must not raise
+
+    def test_context_manager_yields_the_executor(self, executor):
+        with executor as entered:
+            assert entered is executor
+
+    def test_context_manager_closes_on_exit(self, executor, fake_slurm, setup_script):
+        with executor:
+            executor.define_worker("a", [], setup_script)
+            executor.scale_workers("a", 2)
+            job_ids = [s.job_id for s in fake_slurm.submissions]
+
+        assert sorted(fake_slurm.cancelled_job_ids) == sorted(job_ids)
+        assert executor.num_workers() == 0
+
+    def test_context_manager_closes_after_an_exception(
+        self, executor, fake_slurm, setup_script
+    ):
+        """The jobs still get cancelled, and the exception still escapes."""
+        with pytest.raises(ValueError, match="boom"):
+            with executor:
+                executor.define_worker("a", [], setup_script)
+                executor.scale_workers("a", 1)
+                raise ValueError("boom")
+
+        assert fake_slurm.cancelled_job_ids == [fake_slurm.submissions[0].job_id]
+        assert executor.num_workers() == 0
