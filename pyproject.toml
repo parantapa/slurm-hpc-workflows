@@ -29,9 +29,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-optuna = ["optuna", "scipy"]
 botorch = ["botorch"]
-test = ["pytest", "optuna", "scipy", "botorch"]
+test = ["pytest", "botorch"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

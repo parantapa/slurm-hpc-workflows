@@ -21,11 +21,6 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
     so closures and lambdas work.
 - **Non-fatal remote errors** — an exception on a worker
     doesn't kill the driver script; it comes back as the task's result.
-- **Distributed Optuna** — an [Optuna](https://optuna.org/) storage backend
-    that keeps a study's journal in `ds-service`,
-    so many workers can optimize one study,
-    plus QMC and corner-sweep samplers that allocate their points atomically
-    instead of racing.
 - **Batch Bayesian optimization** — a [botorch](https://botorch.org/) optimizer
     that proposes a whole batch of points at once
     and evaluates them across the worker pool,
@@ -216,188 +211,10 @@ rather than letting the workers fail to connect later.
 sets how the server is started, and may be a whole command line
 — `apptainer run ds-service.sif` works as well as a path to a binary.
 
-## Distributed hyperparameter search with Optuna
-
-`slurm_workflows.optuna_storage` provides an Optuna storage
-whose journal lives in the same `ds-service` server the executor uses,
-so every process pointed at one server and prefix shares one study.
-
-Optuna is an optional dependency:
-
-```sh
-pip install -U slurm-workflows[optuna]
-```
-
-```python
-import optuna
-from slurm_workflows import SlurmPilotExecutor
-from slurm_workflows.optuna_storage import create_optuna_storage
-
-server_address = "10.0.0.1:5051"
-storage = create_optuna_storage(server_address, prefix="lr-search")
-study = optuna.create_study(storage=storage, study_name="lr-search")
-
-
-def run_trials(n_trials):
-    # Runs on a compute node. The storage reconnects there on first use.
-    study.optimize(objective, n_trials=n_trials)
-
-
-executor = SlurmPilotExecutor(server_address=server_address)
-executor.define_worker("gpu", ["--partition gpu --gres gpu:1"], setup_script)
-executor.scale_workers("gpu", 8)
-
-tasks = [executor.submit("gpu", run_trials, 25) for _ in range(8)]
-executor.wait(tasks)
-
-print(study.best_params)
-```
-
-The study object is cloudpickled to the workers along with the closure;
-what travels is the server address, not the connection,
-so each worker reconnects on its own node.
-Trials from all 8 workers land in one journal,
-and the driver's `study` sees them as soon as it reads the storage again.
-
-`prefix` namespaces the keys a storage owns.
-Use a different prefix for an unrelated search on the same server;
-reuse a prefix to reopen an existing set of studies
-(`optuna.load_study(storage=..., study_name=...)`).
-
-`create_optuna_storage` returns a plain `optuna.storages.JournalStorage`,
-so anything that accepts an Optuna storage — including `optuna-dashboard` —
-works against it.
-For direct access to the backend, use
-`DsServiceJournalBackend` from the same module.
-
-### Quasi-Monte Carlo search
-
-`optuna.samplers.QMCSampler` is built for shared storage,
-but three details of it misbehave once the workers are separate processes:
-it allocates sequence positions with a non-atomic read-modify-write
-(so concurrent workers evaluate the same point —
-measured at a third to a half of trials with four workers,
-on `RDBStorage` as much as on the journal),
-it needs every worker to be handed the same scramble seed by hand,
-and that shared seed also seeds the random *fallback* sampler,
-making workers duplicate each other's non-QMC draws.
-
-`DsServiceQMCSampler` fixes all three:
-
-```python
-from slurm_workflows.optuna_qmc_sampler import DsServiceQMCSampler
-
-storage = create_optuna_storage(server_address, prefix="tuning")
-study = optuna.create_study(
-    storage=storage,
-    study_name="tuning",
-    load_if_exists=True,          # every worker runs this; first one wins
-    sampler=DsServiceQMCSampler(
-        storage,
-        scramble=True,
-        search_space={            # optional; see below
-            "x": optuna.distributions.FloatDistribution(-10, 10),
-            "lr": optuna.distributions.FloatDistribution(1e-5, 1e-1, log=True),
-        },
-    ),
-)
-```
-
-- Sequence positions come from ds-service's atomic counter —
-    one RPC, incremented under the server's lock,
-    so two workers can never be handed the same one.
-- Workers agree on a scramble seed through the server:
-    the first to start publishes its seed, the rest adopt it.
-    You never pass `seed` unless you want to reproduce a specific run.
-- The fallback sampler is seeded per worker,
-    so a shared scramble seed no longer means identical random draws.
-
-The sampler takes the *storage*, not an address,
-so its counter can't end up on a different server or prefix than the study.
-
-`search_space` is optional but worth giving.
-Without it, Optuna infers the space from the first *finished* trial,
-so every worker that starts before one finishes samples randomly instead
-— with 8 pilot workers that is the first 8 trials.
-Declaring it up front makes trial 0 on every worker already QMC.
-Categorical parameters can't be QMC-sampled;
-leave them out and they go to the independent sampler as usual.
-
-Sobol' (the default) has its lowest discrepancy at n = 2^m,
-so prefer a total trial count that is a power of two.
-
-### Corners of the search space
-
-`ExtremePointSampler` is deterministic:
-given a box of `d` parameters it visits all `2**d` corners,
-one per trial, in a fixed order.
-It's what you run before a real search —
-it bounds the objective's range,
-shows which parameters it's monotone in,
-and finds the corner that makes the code fall over.
-
-```python
-from slurm_workflows.optuna_extreme_point_sampler import ExtremePointSampler
-
-space = {
-    "x": optuna.distributions.FloatDistribution(-10, 10),
-    "lr": optuna.distributions.FloatDistribution(1e-5, 1e-1, log=True),
-    "layers": optuna.distributions.IntDistribution(1, 8),
-}
-storage = create_optuna_storage(server_address, prefix="corners")
-study = optuna.create_study(
-    storage=storage,
-    study_name="corners",
-    load_if_exists=True,
-    sampler=ExtremePointSampler(storage, space),
-)
-study.optimize(objective, n_trials=study.sampler.n_corners)   # 8 corners
-```
-
-Corners are allocated with the same atomic counter the QMC sampler uses,
-so concurrent workers split them exactly —
-no corner twice, none missed —
-and each worker stops itself once the walk is complete,
-so `n_trials` can safely be an overestimate.
-A corner whose worker died is retried
-before any corner is evaluated a second time.
-
-Optuna's `GridSampler` covers the same ground and is fine on a fresh study,
-where it indexes by trial number.
-But once the trial number runs past the grid size —
-a resumed study, retried failures, more trials than points —
-it falls back to scanning for an unvisited point and picking randomly,
-and concurrent workers collide there.
-Measured with four workers on a 32-point grid,
-8 to 13 points were never visited while as many ran twice:
-an exhaustive search that quietly isn't one.
-The counter makes a resumed run no different from a fresh one.
-
-Corner 0 is every parameter at its low,
-and bit *i* of the corner number selects the high of the *i*-th parameter
-(sorted by name).
-That makes corner numbers reproducible,
-but it also means a run stopped early covers a *face* of the box —
-run all `n_corners` trials, or don't read much into the subset.
-Categorical parameters have no extremes and are rejected;
-so is any parameter the objective suggests
-that isn't in the declared space,
-unless you pass an `independent_sampler` to opt into sampling it.
-
-### Putting the three together
-
-`examples/optimize_himmelblau_bii.py` runs one study through all three
-samplers in sequence — corners, then a QMC sweep, then TPE — with every
-phase spread across pilot workers and each one warm-starting the next.
-Because the probe phases have already put trials in the study,
-TPE starts modelling on its first trial
-instead of spending `n_startup_trials` on random draws.
-
 ## Batch Bayesian optimization with botorch
 
-Optuna's samplers hand out points one trial at a time.
-`slurm_workflows.bayes_opt_botorch` takes the other approach:
-it fits one Gaussian process to everything measured so far
+`slurm_workflows.bayes_opt_botorch`
+fits one Gaussian process to everything measured so far
 and asks for a *batch* of points at once,
 chosen jointly so they do not stack on the same spot.
 That is the shape a pilot pool wants —
@@ -512,21 +329,17 @@ modelling everything the earlier calls measured.
 `best_point()` returns the best `(params, value)` seen by either phase.
 
 `examples/optimize_himmelblau_botorch_bii.py` runs the whole thing on a
-cluster, and is worth reading next to `examples/optimize_himmelblau_bii.py`
-— the same objective and the same pilot pool, optimized the Optuna way.
-The Optuna version puts a sampler on every worker and never synchronizes;
-this one keeps the model on the login node
-and ships only the evaluations out,
+cluster. The model stays on the login node
+and only the evaluations are shipped out,
 so it gains a batch chosen jointly and pays for it with a barrier per round.
 
 ## API reference
 
 Import from the package root:
 `from slurm_workflows import SlurmPilotExecutor, check_for_error`.
-(The Optuna storage and the botorch optimizer are the exceptions:
-they live in `slurm_workflows.optuna_storage` and
-`slurm_workflows.bayes_opt_botorch`,
-so that the package keeps working without Optuna or botorch installed.)
+(The botorch optimizer is the exception:
+it lives in `slurm_workflows.bayes_opt_botorch`,
+so that the package keeps working without botorch installed.)
 
 ### `SlurmPilotExecutor(server_address, work_dir=None)`
 
