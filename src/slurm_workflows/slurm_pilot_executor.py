@@ -38,6 +38,11 @@ NoOutput = object()
 
 POLL_INTERVAL_S: float = 0.1
 
+# How often `_as_completed` checks that pending tasks still have
+# a pilot job that could run them.
+# Kept well above POLL_INTERVAL_S because each check costs an `squeue` call.
+LIVE_QUEUE_CHECK_INTERVAL_S: float = 60.0
+
 
 @dataclass
 class Task:
@@ -266,11 +271,26 @@ class SlurmPilotExecutor:
 
     def _as_completed(self, tasks: list[Task]) -> Iterable[Task]:
         pending: list[Task] = []
+        finished: list[Task] = []
         for task in tasks:
             if task.output is NoOutput:
                 pending.append(task)
             else:
-                yield task
+                finished.append(task)
+
+        # Before anything is yielded, so a caller that never scaled a group
+        # is told at once rather than after the first result.
+        if pending:
+            self._raise_if_no_worker_started(pending)
+
+        yield from finished
+
+        # The first check is one interval away rather than immediate.
+        # Submitting before any worker exists is a supported pattern
+        # --- tasks queue up and are picked up as pilot jobs start ---
+        # so a queue with no job on the cluster *yet* is normal here,
+        # and checking straight away would reject it.
+        next_liveness_check = time.monotonic() + LIVE_QUEUE_CHECK_INTERVAL_S
 
         while pending:
             # Status for every pending task comes back in a single request,
@@ -294,6 +314,11 @@ class SlurmPilotExecutor:
                     next_pending.append(task)
 
             pending = next_pending
+
+            if pending and time.monotonic() >= next_liveness_check:
+                self._raise_if_no_live_queue(pending)
+                next_liveness_check = time.monotonic() + LIVE_QUEUE_CHECK_INTERVAL_S
+
             if pending and not completed:
                 time.sleep(POLL_INTERVAL_S)
 
@@ -321,6 +346,108 @@ class SlurmPilotExecutor:
             return {g.name: len(g.workers) for g in self.groups.values()}
         else:
             return sum(len(g.workers) for g in self.groups.values())
+
+    def _live_queues(self, queues: Iterable[str] | None = None) -> set[str]:
+        """Names of the queues that still have a pilot job on the cluster.
+
+        Queue name and worker group name are the same thing,
+        so a queue is live when at least one job submitted for that group
+        is still known to Slurm.
+
+        "Still known to Slurm" means `squeue` lists it,
+        which covers a job that is pending as well as one that is running.
+        A pending job counts as live on purpose:
+        it has not started yet,
+        but tasks on its queue will be served once it does,
+        and treating it as dead would abandon work that is merely waiting
+        for an allocation.
+
+        `queues` restricts the answer to the names given
+        --- unknown names are simply absent from the result ---
+        and the default considers every defined group.
+
+        Whatever `get_running_jobids` raises propagates.
+        A failed `squeue` means liveness is *unknown*,
+        and an empty set would claim the stronger "nothing is live",
+        which a caller could act on by giving up on live work.
+        """
+        job_ids = get_running_jobids()
+
+        groups = self.groups.values()
+        if queues is not None:
+            wanted = set(queues)
+            groups = [g for g in groups if g.name in wanted]
+
+        return {
+            group.name
+            for group in groups
+            if any(worker.job_id in job_ids for worker in group.workers.values())
+        }
+
+    def _raise_if_no_worker_started(self, pending: list[Task]) -> None:
+        """Fail at once on tasks no worker has ever been started for.
+
+        This reads local bookkeeping rather than asking the cluster:
+        a queue is covered when `scale_workers` has submitted at least one job
+        for the group of that name.
+        Whether those jobs are *still* alive is `_raise_if_no_live_queue`'s
+        question, asked periodically from then on.
+
+        Checking here turns the two commonest mistakes
+        --- never scaling a group, and mistyping a queue name ---
+        into an immediate error
+        rather than a wait that lasts until the first liveness check.
+
+        Note this only knows about workers *this* executor submitted.
+        """
+        started = {name for name, group in self.groups.items() if group.workers}
+
+        starved = [task for task in pending if not set(task.queue) & started]
+        if not starved:
+            return
+
+        queues = sorted({q for task in starved for q in task.queue})
+        raise RuntimeError(
+            f"{len(starved)} of {len(pending)} pending tasks are on queues with "
+            f"no worker started: {queues}. "
+            f"Call scale_workers() for a worker group of that name "
+            f"before waiting on them."
+        )
+
+    def _raise_if_no_live_queue(self, pending: list[Task]) -> None:
+        """Fail fast on pending tasks whose queues have no pilot job left.
+
+        A task is stranded when none of the queues it was submitted to
+        still has a job on the cluster:
+        nothing is left to pull it,
+        so waiting on it would block until the caller gives up.
+
+        A `squeue` that cannot be reached leaves liveness *unknown*,
+        which is not the same as dead,
+        so that case is logged and retried at the next interval
+        rather than aborting a wait that may be perfectly healthy.
+        """
+        try:
+            live = self._live_queues({q for task in pending for q in task.queue})
+        except (subprocess.SubprocessError, OSError):
+            self.logger.warning(
+                "Could not check whether queues are still live; "
+                "will retry at the next interval",
+                exc_info=True,
+            )
+            return
+
+        stranded = [task for task in pending if not set(task.queue) & live]
+        if not stranded:
+            return
+
+        queues = sorted({q for task in stranded for q in task.queue})
+        raise RuntimeError(
+            f"{len(stranded)} of {len(pending)} pending tasks are on queues with "
+            f"no live pilot job, so they can never run: {queues}. "
+            f"Scale up a worker group named after one of those queues, "
+            f"or cancel the wait."
+        )
 
     def _cleanup_all_workers(self):
         try:

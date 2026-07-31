@@ -19,7 +19,7 @@ so that the package keeps working without botorch installed.)
 | `define_worker(name, sbatch_args, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
 | `scale_workers(name, count)` | Submit or cancel pilot jobs so the group has `count` jobs. |
 | `submit(queue, fn, *args, **kwargs) -> Task` | Enqueue a task. `queue` is a group name or a list of them; `fn` is a callable, or a method name (`str`) for actor workers. |
-| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. |
+| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. Raises if a pending task's queues all lose their pilot jobs — see below. |
 | `wait(tasks, desc=None, unit="task")` | Same, but discards the iterator — just block until all are done. |
 | `num_groups()` / `num_workers(detail=False)` | Counts of defined groups and submitted workers; `detail=True` returns a per-group dict. |
 | `stop()` | Cancel all pilot jobs, keep the executor usable. |
@@ -40,6 +40,38 @@ with SlurmPilotExecutor(server_address=address) as executor:
 
 Leaving the block calls `close()`, so the executor is spent afterwards.
 An exception raised inside the block still propagates.
+
+### Waiting on tasks nothing can run
+
+A task whose queues have no worker can never finish,
+so `as_completed` / `wait` raise `RuntimeError` naming those queues
+rather than blocking until you give up.
+They check this twice, for two different failure modes.
+
+**Before waiting at all**, and without asking Slurm,
+they require that `scale_workers` has been called
+for at least one of each pending task's queues.
+This catches the two mistakes that would otherwise cost you a minute of
+staring at a progress bar: forgetting to scale a group,
+and mistyping a queue name (queue names are not validated at `submit` time).
+The error is raised before any result is yielded,
+so a finished task in the same batch cannot mask a stranded one.
+
+**Then once a minute while blocked**,
+they ask `squeue` whether each pending task's queues
+still have a job on the cluster —
+catching an allocation that ended, jobs that were cancelled,
+and jobs that died before draining their queue.
+The first of these checks is a minute in, not immediate,
+so the documented submit-then-scale order keeps working:
+a queue whose job has not started *yet* is not a queue that has lost it.
+A `squeue` that cannot be reached leaves liveness unknown rather than dead,
+so that case is logged and retried instead of ending the wait.
+
+Both checks only know about workers **this executor** started.
+An executor that submits to a queue served by pilot jobs
+some other process launched will be refused;
+have the executor that waits be the one that scaled the group.
 
 Remaining `define_worker` options:
 

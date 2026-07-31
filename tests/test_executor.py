@@ -10,6 +10,7 @@ so executor behaviour is isolated from worker behaviour.
 from __future__ import annotations
 
 import itertools
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ import cloudpickle
 from typeguard import TypeCheckError
 
 from slurm_workflows import check_for_error
+from slurm_workflows import slurm_pilot_executor as spe
 from slurm_workflows.slurm_pilot_executor import (
     NoOutput,
     SlurmPilotExecutor,
@@ -374,6 +376,10 @@ class TestSubmit:
 
 
 class TestAsCompleted:
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu")
+
     def test_yields_results(self, executor, ds_client):
         tasks = [executor.submit("cpu", square, i) for i in range(5)]
         drain(ds_client, "cpu", 5)
@@ -463,6 +469,10 @@ class TestAsCompleted:
 
 
 class TestRemoteErrors:
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu")
+
     def test_worker_exception_is_returned_not_raised(self, executor, ds_client):
         task = executor.submit("cpu", square, 1)
         fail_one(ds_client, "cpu", error_id="ERROR_abc")
@@ -500,6 +510,280 @@ class TestRemoteErrors:
         out = capsys.readouterr().out
         assert "ERROR_xyz" in out
         assert task.task_id in out
+
+
+# --------------------------------------------------------------------------
+# live queues
+# --------------------------------------------------------------------------
+
+
+class TestLiveQueues:
+    def test_no_groups_means_nothing_is_live(self, executor):
+        assert executor._live_queues() == set()
+
+    def test_a_defined_but_unscaled_group_is_not_live(self, executor, setup_script):
+        executor.define_worker("cpu", [], setup_script)
+
+        assert executor._live_queues() == set()
+
+    def test_a_group_with_a_queued_job_is_live(self, executor, setup_script):
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+
+        assert executor._live_queues() == {"cpu"}
+
+    def test_only_groups_with_jobs_still_on_the_cluster_are_live(
+        self, executor, fake_slurm, setup_script
+    ):
+        executor.define_worker("cpu", [], setup_script)
+        executor.define_worker("gpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        executor.scale_workers("gpu", 1)
+        gpu_job = fake_slurm.submissions[-1].job_id
+
+        # The gpu job ends; its group has nothing left on the cluster.
+        fake_slurm.running_job_ids.remove(gpu_job)
+
+        assert executor._live_queues() == {"cpu"}
+
+    def test_a_group_is_live_while_any_of_its_jobs_survives(
+        self, executor, fake_slurm, setup_script
+    ):
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 3)
+        first = fake_slurm.submissions[0].job_id
+
+        fake_slurm.running_job_ids.remove(first)
+
+        assert executor._live_queues() == {"cpu"}
+
+    def test_queues_argument_restricts_the_answer(self, executor, setup_script):
+        executor.define_worker("cpu", [], setup_script)
+        executor.define_worker("gpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        executor.scale_workers("gpu", 1)
+
+        assert executor._live_queues(["cpu"]) == {"cpu"}
+        assert executor._live_queues(["cpu", "gpu"]) == {"cpu", "gpu"}
+        assert executor._live_queues([]) == set()
+
+    def test_unknown_queue_names_are_absent_not_an_error(self, executor, setup_script):
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+
+        assert executor._live_queues(["nope"]) == set()
+        assert executor._live_queues(["cpu", "nope"]) == {"cpu"}
+
+    def test_squeue_failure_propagates(self, executor, fake_slurm, setup_script):
+        """Unknown liveness must not be reported as "nothing is live"."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        fake_slurm.fail_command("squeue")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            executor._live_queues()
+
+
+# --------------------------------------------------------------------------
+# no worker started
+# --------------------------------------------------------------------------
+
+
+class TestNoWorkerStarted:
+    """The up-front check, before any polling and without asking Slurm."""
+
+    def test_a_group_that_was_never_scaled_is_rejected(self, executor, setup_script):
+        """Defining a group submits nothing, so no worker exists for it."""
+        executor.define_worker("cpu", [], setup_script)
+        task = executor.submit("cpu", square, 2)
+
+        with pytest.raises(RuntimeError, match="no worker started"):
+            list(executor.as_completed([task]))
+
+    def test_a_queue_matching_no_group_is_rejected(self, executor):
+        """Queue names are not validated at submit time, so a typo lands here."""
+        task = executor.submit("typo-in-queue-name", square, 2)
+
+        with pytest.raises(RuntimeError, match="no worker started"):
+            list(executor.as_completed([task]))
+
+    def test_the_error_names_the_queues(self, executor):
+        task = executor.submit("ghost", square, 2)
+
+        with pytest.raises(RuntimeError, match=r"\['ghost'\]"):
+            list(executor.as_completed([task]))
+
+    def test_wait_rejects_too(self, executor):
+        task = executor.submit("ghost", square, 2)
+
+        with pytest.raises(RuntimeError, match="no worker started"):
+            executor.wait([task])
+
+    def test_it_raises_before_yielding_anything(
+        self, executor, ds_client, setup_script
+    ):
+        """A finished task in the same batch must not mask the bad one."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        done = executor.submit("cpu", square, 3)
+        drain(ds_client, "cpu", 1)
+        executor.wait([done])
+
+        stranded = executor.submit("ghost", square, 2)
+
+        yielded = []
+        with pytest.raises(RuntimeError, match="no worker started"):
+            for task in executor.as_completed([done, stranded]):
+                yielded.append(task)
+
+        assert yielded == [], "the error must come before any result"
+
+    def test_one_live_queue_is_enough(self, executor, ds_client, setup_script):
+        """A task submitted to several queues needs a worker on only one."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit(["cpu", "ghost"], square, 4)
+
+        drain(ds_client, "cpu", 1)
+
+        (result,) = list(executor.as_completed([task]))
+        assert result.output == 16
+
+    def test_finished_tasks_need_no_worker(self, executor, ds_client, setup_script):
+        """Nothing is pending, so there is nothing a worker could still run."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit("cpu", square, 5)
+        drain(ds_client, "cpu", 1)
+        executor.wait([task])
+
+        executor.groups.clear()  # as if this executor never started anything
+
+        assert [t.output for t in executor.as_completed([task])] == [25]
+
+    def test_an_empty_batch_is_fine(self, executor):
+        assert list(executor.as_completed([])) == []
+
+
+# --------------------------------------------------------------------------
+# stranded tasks
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def check_immediately(monkeypatch):
+    """Collapse the liveness interval so one poll triggers a check.
+
+    The real 60s gap exists so that submitting before scaling workers keeps
+    working; these tests are about what happens once the gap has elapsed.
+    """
+
+    monkeypatch.setattr(spe, "LIVE_QUEUE_CHECK_INTERVAL_S", 0.0)
+
+
+class TestStrandedTasks:
+    def test_raises_when_the_queue_has_no_live_job(
+        self, executor, fake_slurm, setup_script, check_immediately, time_limit
+    ):
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit("cpu", square, 2)
+
+        # Every pilot job for `cpu` ends without draining the queue.
+        fake_slurm.running_job_ids.clear()
+
+        with time_limit(10, "as_completed did not notice the dead queue"):
+            with pytest.raises(RuntimeError, match="no live pilot job"):
+                list(executor.as_completed([task]))
+
+    def test_error_names_the_dead_queues(
+        self, executor, fake_slurm, setup_script, check_immediately, time_limit
+    ):
+        executor.define_worker("gpu", [], setup_script)
+        executor.scale_workers("gpu", 1)
+        task = executor.submit("gpu", square, 2)
+        fake_slurm.running_job_ids.clear()
+
+        with time_limit(10, "as_completed did not notice the dead queue"):
+            with pytest.raises(RuntimeError, match=r"\['gpu'\]"):
+                list(executor.as_completed([task]))
+
+    def test_a_task_is_fine_while_any_of_its_queues_is_live(
+        self, executor, fake_slurm, setup_script, ds_client, check_immediately
+    ):
+        """Submitting to several queues survives losing one of them."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.define_worker("gpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        executor.scale_workers("gpu", 1)
+        gpu_job = fake_slurm.submissions[-1].job_id
+
+        task = executor.submit(["cpu", "gpu"], square, 3)
+        fake_slurm.running_job_ids.remove(gpu_job)
+
+        drain(ds_client, "cpu", 1)
+
+        (done,) = list(executor.as_completed([task]))
+        assert done.output == 9
+
+    def test_wait_raises_too(
+        self, executor, fake_slurm, setup_script, check_immediately, time_limit
+    ):
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit("cpu", square, 2)
+        fake_slurm.running_job_ids.clear()
+
+        with time_limit(10, "wait did not notice the dead queue"):
+            with pytest.raises(RuntimeError, match="no live pilot job"):
+                executor.wait([task])
+
+    def test_already_finished_tasks_are_not_checked(
+        self, executor, fake_slurm, setup_script, ds_client, check_immediately
+    ):
+        """Nothing is pending, so a dead queue is irrelevant."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit("cpu", square, 4)
+        drain(ds_client, "cpu", 1)
+        executor.wait([task])
+
+        fake_slurm.running_job_ids.clear()
+
+        assert [t.output for t in executor.as_completed([task])] == [16]
+
+    def test_squeue_failure_does_not_abort_the_wait(
+        self, executor, fake_slurm, setup_script, ds_client, check_immediately
+    ):
+        """Unknown liveness is not dead liveness: keep waiting."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        task = executor.submit("cpu", square, 5)
+        fake_slurm.fail_command("squeue")
+
+        drain(ds_client, "cpu", 1)
+
+        (done,) = list(executor.as_completed([task]))
+        assert done.output == 25
+
+    def test_not_checked_before_the_interval_elapses(
+        self, executor, fake_slurm, setup_script, ds_client
+    ):
+        """A queue with no job yet is normal right after submitting.
+
+        This is the pattern the README documents:
+        submit first, scale workers after.
+        Without the initial delay it would raise instead of waiting.
+        """
+        executor.define_worker("cpu", [], setup_script)
+        task = executor.submit("cpu", square, 6)
+        assert fake_slurm.running_job_ids == []
+
+        executor.scale_workers("cpu", 1)
+        drain(ds_client, "cpu", 1)
+
+        (done,) = list(executor.as_completed([task]))
+        assert done.output == 36
 
 
 # --------------------------------------------------------------------------

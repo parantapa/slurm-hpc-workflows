@@ -39,6 +39,10 @@ def boom():
 
 
 class TestTaskExecution:
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu", "gpu")
+
     def test_runs_a_task_and_posts_the_result(
         self, executor, ds_service_address, tmp_path
     ):
@@ -102,6 +106,10 @@ class TestTaskExecution:
 
 
 class TestRemoteErrors:
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu")
+
     def test_exception_is_captured_not_propagated(
         self, executor, ds_service_address, tmp_path
     ):
@@ -161,6 +169,10 @@ class TestRemoteErrors:
 
 
 class TestActors:
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu")
+
     def test_actor_is_instantiated_once_at_startup(self, ds_service_address, tmp_path):
         worker = make_worker(
             ds_service_address, tmp_path, actor_class_name="support_actor.CounterActor"

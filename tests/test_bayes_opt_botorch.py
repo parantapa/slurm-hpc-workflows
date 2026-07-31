@@ -710,6 +710,10 @@ class TestRealExecutor:
     and this is where that assumption meets the real implementation.
     """
 
+    @pytest.fixture(autouse=True)
+    def _pilot_jobs(self, pilot_jobs):
+        pilot_jobs("cpu")
+
     def test_optimizes_through_a_real_worker(
         self, executor, ds_service_address, tmp_path
     ):

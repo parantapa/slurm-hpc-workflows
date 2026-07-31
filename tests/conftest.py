@@ -261,6 +261,29 @@ def executor(ds_service_address: str, fake_slurm: FakeSlurm, tmp_path: Path):
 
 
 @pytest.fixture
+def pilot_jobs(executor):
+    """Declare that pilot jobs exist for the named groups.
+
+    `as_completed` refuses to wait on a queue
+    this executor never started a worker for,
+    so any test that waits has to say a pilot job was submitted
+    --- even when the thing that actually drains the queue is `drain()`
+    or a worker running in-process.
+    The Slurm job stands in for the allocation;
+    those stand in for the process inside it.
+
+    Use as `pilot_jobs("cpu")` in a test, or once in an autouse fixture.
+    """
+
+    def declare(*names: str) -> None:
+        for name in names:
+            executor.define_worker(name, [])
+            executor.scale_workers(name, 1)
+
+    return declare
+
+
+@pytest.fixture
 def setup_script() -> str:
     """A setup script body, as define_worker expects."""
     return "module load gcc/14.2.0\nexport TEST_SETUP=1\n"

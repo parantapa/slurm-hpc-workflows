@@ -230,6 +230,18 @@ Common failure modes:
     The queue name doesn't match a worker group name,
     or the workers can't reach `ds-service` from the compute nodes.
     Check the worker's `-<jobid>-<task>.out` file.
+- **`RuntimeError: ... tasks are on queues with no worker started`.**
+    Raised as soon as you wait,
+    because `scale_workers` was never called for those queues.
+    Either you forgot to scale the group,
+    or the queue name is a typo — it is not checked at `submit` time,
+    so compare it against your `define_worker` names.
+- **`RuntimeError: ... tasks are on queues with no live pilot job`.**
+    Raised while waiting: the group *was* scaled,
+    but its jobs have since left the cluster
+    — time limit reached, cancelled, or exited before draining the queue.
+    The worker's `.out` file will say which.
+    Scale the group back up and resubmit.
 - **Jobs start and exit within seconds.**
     The setup script failed.
     It runs inside the worker script,
