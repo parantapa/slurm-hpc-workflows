@@ -97,19 +97,19 @@ def do_step_pi(start, stop, step, stepsize):
 
 def main():
     # The queue server runs on the login node, for as long as this block.
-    # `wait_until_ready()` matters: the server may take a moment to start.
-    # A client that connects too early might not be able to connect
-    # and will exit with error.
-    with DsServiceServer(ds_service_bin=DS_SERVICE_BIN) as ds_service:
+    # Workers connect to it from the compute nodes,
+    # so it is bound to an interface they can route to:
+    # `ib0`, the login node's InfiniBand interface.
+    # A login node without `ib0` raises here,
+    # rather than starting a server the workers would never reach.
+    with DsServiceServer(interface="ib0", ds_service_bin=DS_SERVICE_BIN) as ds_service:
+        # This matters: the server may take a moment to start.
+        # A client that connects too early might not be able to connect
+        # and will exit with error.
         ds_service.wait_until_ready()
 
-        # Workers connect to *this* address from the compute nodes,
-        # so it has to be one they can route to.
-        # `ib0` is the login node's InfiniBand interface.
-        # If `ib0` is missing this warns and falls back to 127.0.0.1 ---
-        # treat that warning as an error,
-        # because the workers will not connect.
-        address = ds_service.get_address_by_interface("ib0")
+        # `ib0`'s address, and the port the server picked.
+        address = ds_service.address
 
         # Leaving this block cancels every pilot job,
         # including if the body raises.

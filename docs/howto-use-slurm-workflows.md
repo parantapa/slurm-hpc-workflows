@@ -183,6 +183,11 @@ and proposes a whole batch of points per round,
 evaluated across the worker pool
 — so a round's points run concurrently on the pilot pool described above.
 
+The model fit is a task as well, on a queue of its own
+(`optimizer_queue`, alongside the `objective_queue` the evaluations go to),
+so the driver only submits and waits,
+and only the fit's workers need botorch installed.
+
 It has its own guide:
 **[Batch Bayesian optimization with botorch](bayesian-optimization-using-botorch.md)**.
 

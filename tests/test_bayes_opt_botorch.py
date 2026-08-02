@@ -3,15 +3,25 @@
 The optimizer's contract with the executor is two calls wide ---
 `submit()` returning a `Task`, and `wait()` filling in that task's `output` ---
 so most tests here drive that contract through `LocalExecutor`,
-which runs the objective inline.
+which runs whatever it is handed inline ---
+both the objective and, since the fit became a task of its own,
+`fit_and_propose`.
 Fitting a GP and optimizing an acquisition function
 is the expensive part of every one of these tests;
 paying for a queue round trip on top would buy nothing,
 because the optimizer cannot tell the difference.
 
-`TestRealExecutor` is what keeps that stand-in honest:
+Running the fit inline is also what keeps the monkeypatching here honest:
+a patched `bo.optimize_acqf` reaches the task
+because the task ran in this process.
+`TestOptimizerQueue` covers what only shows up once it does not:
+which queue the fit went to,
+and what a failure on the far end says.
+
+`TestRealExecutor` is what keeps the stand-in honest:
 it runs a whole optimization through the real executor,
-the real ds-service queue and a real worker,
+the real ds-service queue and a real worker
+--- the fit included, on the same queue ---
 so the two-call contract is pinned against the thing it stands in for.
 
 The four tests in `TestSearchBehaviour` assert *behaviour of the search*,
@@ -31,6 +41,8 @@ lost 1 run in 10.
 from __future__ import annotations
 
 import math
+import re
+import statistics
 import threading
 from typing import cast
 
@@ -39,10 +51,7 @@ import pytest
 pytest.importorskip("botorch")
 
 import torch  # noqa: E402
-from botorch.acquisition import (  # noqa: E402
-    qLogExpectedImprovement,
-    qProbabilityOfImprovement,
-)
+from botorch.acquisition import qLogNoisyExpectedImprovement  # noqa: E402
 
 from slurm_workflows import bayes_opt_botorch as bo  # noqa: E402
 from slurm_workflows.bayes_opt_botorch import (  # noqa: E402
@@ -118,13 +127,18 @@ def as_executor(executor: LocalExecutor) -> SlurmPilotExecutor:
 
 
 def sphere(x, y):
-    """Convex, minimum f = 0 at the origin."""
-    return x * x + y * y
+    """Convex, minimum f = 0 at the origin.
+
+    Objectives return a mapping, not a bare number: the value to minimize
+    under "objective", plus whatever else is worth recording. The extra key
+    here keeps the tests honest about the optimizer carrying it through.
+    """
+    return {"objective": x * x + y * y, "note": "sphere"}
 
 
 def identity(x):
     """Monotone: the minimum is at the low edge of the box."""
-    return x
+    return {"objective": x}
 
 
 BOX_2D = {"x": FloatRange(-5.0, 5.0), "y": FloatRange(-5.0, 5.0)}
@@ -134,25 +148,64 @@ SEED = 20260730
 
 
 def make_opt(
-    objective=sphere, space=None, explore=8, search=8, parallel=4, seed=SEED, **extra
+    objective=sphere,
+    space=None,
+    explore=8,
+    iterations=2,
+    parallel=4,
+    seed: int | None = SEED,
+    objective_queue: str | list[str] = "cpu",
+    optimizer_queue: str | list[str] = "opt",
+    **extra,
 ):
     """An optimizer wired to a fresh LocalExecutor.
 
-    `seed` is named explicitly
-    so it is not swallowed by `**extra`, which goes to the objective.
+    `seed` and the two queue names are named explicitly
+    so they are not swallowed by `**extra`, which goes to the objective.
+
+    The two queues are given different names throughout,
+    so a test that asserts on `executor.queues`
+    is asserting which kind of work went where,
+    not just that something was submitted.
+
+    `iterations` pins the round count by setting both search bounds to it,
+    which switches early stopping off:
+    a stall can only end the search at a round at or above the floor,
+    and with floor == ceiling that is the round the loop ends on anyway,
+    so the search runs exactly that many rounds.
+    Tests that are *about* early stopping pass the bounds themselves.
     """
     space = BOX_2D if space is None else space
     executor = LocalExecutor()
+
+    early = {"min_search_iterations": iterations, "max_search_iterations": iterations}
+    for name in (
+        "min_search_iterations",
+        "max_search_iterations",
+        "patience",
+        "min_improvement",
+        "objective_key",
+        # The acquisition knobs travel the same way: named here so they
+        # reach the optimizer instead of being handed to the objective.
+        "num_restarts",
+        "raw_samples",
+        "mc_samples",
+        "acqf_timeout_s",
+    ):
+        if name in extra:
+            early[name] = extra.pop(name)
+
     opt = BayesOptBotorch(
         "test",
         space,
         objective,
         as_executor(executor),
-        "cpu",
+        objective_queue,
+        optimizer_queue,
         explore,
-        search,
         parallel,
         seed,
+        **early,
         **extra,
     )
     return opt, executor
@@ -316,13 +369,63 @@ class TestConstruction:
         with pytest.raises(ValueError):
             make_opt(space={})
 
-    def test_rejects_a_negative_search_budget(self):
-        with pytest.raises(ValueError):
-            make_opt(search=-1)
+    def test_rejects_negative_search_iterations(self):
+        with pytest.raises(ValueError, match="min_search_iterations"):
+            make_opt(iterations=-1)
+
+    def test_rejects_a_ceiling_below_the_floor(self):
+        with pytest.raises(ValueError, match="max_search_iterations"):
+            make_opt(min_search_iterations=5, max_search_iterations=4)
+
+    def test_rejects_zero_patience(self):
+        # Zero would end the search before a round could reset the counter.
+        with pytest.raises(ValueError, match="patience"):
+            make_opt(patience=0)
+
+    def test_rejects_negative_min_improvement(self):
+        with pytest.raises(ValueError, match="min_improvement"):
+            make_opt(min_improvement=-0.1)
 
     def test_rejects_zero_parallelism(self):
         with pytest.raises(ValueError):
             make_opt(parallel=0)
+
+    @pytest.mark.parametrize(
+        "knob, value",
+        [
+            ("num_restarts", 0),
+            ("raw_samples", 0),
+            ("mc_samples", 0),
+            ("acqf_timeout_s", 0.0),
+            ("acqf_timeout_s", -1.0),
+        ],
+    )
+    def test_rejects_a_degenerate_acquisition_knob(self, knob, value):
+        # Each of these reaches botorch on a compute node.
+        # Caught here, the message names the argument;
+        # caught there, it is a stack trace in a worker log.
+        with pytest.raises(ValueError, match=knob):
+            make_opt(**{knob: value})
+
+    def test_the_acquisition_knobs_are_kept_as_given(self):
+        # They are the run's settings, carried on the instance
+        # and read again for every fit task.
+        opt, _ = make_opt(
+            num_restarts=3, raw_samples=7, mc_samples=11, acqf_timeout_s=1.5
+        )
+        assert opt.num_restarts == 3
+        assert opt.raw_samples == 7
+        assert opt.mc_samples == 11
+        assert opt.acqf_timeout_s == 1.5
+
+    def test_the_acquisition_knobs_have_usable_defaults(self):
+        # The values themselves live in the signature and are not pinned here;
+        # what matters is that an unconfigured run has them at all.
+        opt, _ = make_opt()
+        assert opt.num_restarts >= 1
+        assert opt.raw_samples >= opt.num_restarts
+        assert opt.mc_samples >= 1
+        assert opt.acqf_timeout_s > 0.0
 
     def test_rejects_extra_kwargs_that_shadow_a_parameter(self):
         # Silently overriding a searched parameter
@@ -357,14 +460,24 @@ class TestExploration:
     def test_accepts_a_list_of_queues(self):
         executor = LocalExecutor()
         opt = BayesOptBotorch(
-            "t", BOX_2D, sphere, as_executor(executor), ["a", "b"], 2, 0, 1, SEED
+            "t",
+            BOX_2D,
+            sphere,
+            as_executor(executor),
+            ["a", "b"],
+            "opt",
+            2,
+            1,
+            SEED,
+            min_search_iterations=0,
+            max_search_iterations=0,
         )
         opt.run_exploration_jobs()
         assert executor.queues == [["a", "b"]] * 2
 
     def test_passes_extra_kwargs_to_the_objective(self):
         def objective(x, y, *, scale):
-            return scale * sphere(x, y)
+            return {"objective": scale * sphere(x, y)["objective"]}
 
         opt, executor = make_opt(objective=objective, explore=4, scale=3.0)
         opt.run_exploration_jobs()
@@ -379,7 +492,9 @@ class TestExploration:
             "c": CategoricalRange(3),
         }
         opt, _ = make_opt(
-            objective=lambda f, l, i, c: f + l + i + c, space=space, explore=16
+            objective=lambda f, l, i, c: {"objective": f + l + i + c},
+            space=space,
+            explore=16,
         )
         opt.run_exploration_jobs()
         for p in opt.points:
@@ -404,6 +519,42 @@ class TestExploration:
         second.run_exploration_jobs()
         assert first.points == second.points
 
+    def test_an_omitted_seed_is_drawn(self):
+        first, _ = make_opt(explore=4, seed=None)
+        second, _ = make_opt(explore=4, seed=None)
+
+        assert first.seed is not None
+        assert first.seed != second.seed, "two unseeded runs must not coincide"
+
+    def test_a_drawn_seed_fits_what_sobol_accepts(self):
+        """torch unpacks the seed as a signed long long and overflows above it."""
+        for _ in range(10):
+            opt, _ = make_opt(explore=4, seed=None)
+            assert 0 <= opt.seed < 2**63
+
+    def test_a_drawn_seed_reproduces_its_own_run(self):
+        """Otherwise an unseeded run could never be repeated."""
+        first, _ = make_opt(explore=8, seed=None)
+        first.run_exploration_jobs()
+
+        second, _ = make_opt(explore=8, seed=first.seed)
+        second.run_exploration_jobs()
+
+        assert first.points == second.points
+
+    def test_a_drawn_seed_is_reported(self, capsys):
+        """It is only reproducible if the user can see what was used."""
+        opt, _ = make_opt(explore=4, seed=None)
+
+        out = capsys.readouterr().out
+        assert str(opt.seed) in out
+        assert "no seed given" in out
+
+    def test_an_explicit_seed_is_not_announced(self, capsys):
+        make_opt(explore=4, seed=7)
+
+        assert "no seed given" not in capsys.readouterr().out
+
     def test_a_different_seed_gives_a_different_design(self):
         first, _ = make_opt(explore=8, seed=7)
         second, _ = make_opt(explore=8, seed=8)
@@ -415,10 +566,30 @@ class TestExploration:
         # The seed is the only thing that decides the design.
         # The name is for progress bars and error messages.
         first = BayesOptBotorch(
-            "one", BOX_2D, sphere, as_executor(LocalExecutor()), "cpu", 8, 0, 1, 7
+            "one",
+            BOX_2D,
+            sphere,
+            as_executor(LocalExecutor()),
+            "cpu",
+            "opt",
+            8,
+            1,
+            7,
+            min_search_iterations=0,
+            max_search_iterations=0,
         )
         second = BayesOptBotorch(
-            "two", BOX_2D, sphere, as_executor(LocalExecutor()), "cpu", 8, 0, 1, 7
+            "two",
+            BOX_2D,
+            sphere,
+            as_executor(LocalExecutor()),
+            "cpu",
+            "opt",
+            8,
+            1,
+            7,
+            min_search_iterations=0,
+            max_search_iterations=0,
         )
         first.run_exploration_jobs()
         second.run_exploration_jobs()
@@ -433,7 +604,9 @@ class TestExploration:
         # the model must be told where the objective really ran,
         # not where the continuous proposal landed.
         space = {"i": IntRange(0, 4)}
-        opt, _ = make_opt(objective=lambda i: float(i), space=space, explore=8)
+        opt, _ = make_opt(
+            objective=lambda i: {"objective": float(i)}, space=space, explore=8
+        )
         opt.run_exploration_jobs()
         for params, unit in zip(opt.points, opt.unit_points):
             assert unit == [params["i"] / 4]
@@ -444,22 +617,196 @@ class TestExploration:
 # --------------------------------------------------------------------------
 
 
-class TestSearchBudget:
-    def test_evaluates_exactly_the_search_budget(self):
-        opt, executor = make_opt(explore=4, search=8, parallel=4)
-        opt.run_exploration_jobs()
-        opt.run_search_jobs()
-        assert len(opt.values) == 4 + 8
-        assert executor.num_submitted == 4 + 8
+def constant(x, y):
+    """Flat: nothing a search does can ever improve on the incumbent."""
+    return {"objective": 1.0}
 
-    def test_the_last_round_is_short_rather_than_overshooting(self):
-        opt, executor = make_opt(explore=4, search=5, parallel=3)
+
+def rounds_run(opt, explored: int) -> int:
+    """How many search rounds actually ran."""
+    return (len(opt.values) - explored) // opt.search_parallelism
+
+
+class TestEarlyStopping:
+    def test_stops_after_patience_stalled_rounds(self):
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=2,
+            max_search_iterations=30,
+            patience=3,
+        )
         opt.run_exploration_jobs()
         opt.run_search_jobs()
-        assert len(opt.values) == 4 + 5
+
+        # Stalls count from the first round, so patience alone decides
+        # once it is the larger of the two.
+        assert rounds_run(opt, 4) == 3
+
+    def test_the_floor_runs_even_when_nothing_improves(self):
+        """Patience below the floor cannot cut the search short."""
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=6,
+            max_search_iterations=30,
+            patience=1,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert rounds_run(opt, 4) == 6
+
+    def test_stalls_below_the_floor_are_carried_past_it(self):
+        """The floor holds off the stop, not the counting.
+
+        Five rounds' worth of patience is already spent
+        by the time the floor is behind us,
+        so the search ends the moment it may
+        --- at the floor, not at floor + patience.
+        """
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=3,
+            max_search_iterations=30,
+            patience=2,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert rounds_run(opt, 4) == 3
+
+    def test_the_ceiling_stops_a_search_that_keeps_improving(self):
+        opt, _ = make_opt(
+            objective=sphere,
+            explore=4,
+            parallel=2,
+            min_search_iterations=0,
+            max_search_iterations=4,
+            patience=100,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert rounds_run(opt, 4) == 4
+
+    def test_an_improving_round_resets_the_counter(self, monkeypatch):
+        """Patience bounds a *run* of bad rounds, not their total."""
+        seen = []
+
+        def improved(self, previous, current):
+            # stall, stall, improve, stall, stall, stall -> stop at 6
+            pattern = [False, False, True, False, False, False]
+            seen.append(len(seen))
+            return pattern[min(len(seen) - 1, len(pattern) - 1)]
+
+        monkeypatch.setattr(bo.BayesOptBotorch, "_improved_enough", improved)
+        opt, _ = make_opt(
+            objective=sphere,
+            explore=4,
+            parallel=2,
+            min_search_iterations=0,
+            max_search_iterations=30,
+            patience=3,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert rounds_run(opt, 4) == 6
+
+    def test_a_zero_floor_leaves_patience_in_charge(self):
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=0,
+            max_search_iterations=30,
+            patience=2,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert rounds_run(opt, 4) == 2
+
+    def test_it_says_why_it_stopped(self, capsys):
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=0,
+            max_search_iterations=30,
+            patience=2,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+        assert "stopping after 2 rounds" in out
+        assert "5%" in out
+
+
+class TestImprovementTest:
+    """`_improved_enough` decides every stall, so its edges matter."""
+
+    @pytest.fixture
+    def opt(self):
+        opt, _ = make_opt(min_improvement=0.05)
+        return opt
+
+    def test_a_big_enough_drop_counts(self, opt):
+        assert opt._improved_enough(1.0, 0.94)
+
+    def test_a_drop_below_the_threshold_does_not(self, opt):
+        assert not opt._improved_enough(1.0, 0.96)
+
+    def test_the_threshold_is_inclusive(self, opt):
+        assert opt._improved_enough(1.0, 0.95)
+
+    def test_no_change_is_not_improvement(self, opt):
+        assert not opt._improved_enough(1.0, 1.0)
+
+    def test_getting_worse_is_not_improvement(self, opt):
+        assert not opt._improved_enough(1.0, 2.0)
+
+    def test_it_is_relative_not_absolute(self, opt):
+        """The same absolute step is decisive at one scale and noise at another."""
+        assert opt._improved_enough(1.0, 0.9)
+        assert not opt._improved_enough(1000.0, 999.9)
+
+    def test_a_negative_incumbent_uses_its_magnitude(self, opt):
+        # -10 -> -11 is a 10% improvement; -10 -> -10.1 is 1%.
+        assert opt._improved_enough(-10.0, -11.0)
+        assert not opt._improved_enough(-10.0, -10.1)
+
+    def test_a_zero_incumbent_accepts_any_decrease(self, opt):
+        """Zero has no magnitude to take a fraction of."""
+        assert opt._improved_enough(0.0, -1e-9)
+        assert not opt._improved_enough(0.0, 0.0)
+
+
+class TestSearchBudget:
+    def test_evaluates_iterations_times_parallelism(self):
+        opt, executor = make_opt(explore=4, iterations=2, parallel=4)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+        assert len(opt.values) == 4 + 2 * 4
+        # The evaluations, plus one fit-and-propose task per round ---
+        # which is submitted like any other task and counts here too.
+        assert executor.num_submitted == 4 + 2 * 4 + 2
+
+    def test_every_round_is_the_full_width_of_the_pool(self):
+        """No short final round: the budget is rounds, not points."""
+        opt, executor = make_opt(explore=4, iterations=3, parallel=3)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+        assert len(opt.values) == 4 + 3 * 3
 
     def test_a_zero_budget_does_nothing(self):
-        opt, executor = make_opt(explore=4, search=0)
+        opt, executor = make_opt(explore=4, iterations=0)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
         assert executor.num_submitted == 4
@@ -471,7 +818,7 @@ class TestSearchBudget:
             opt.run_search_jobs()
 
     def test_can_be_resumed_for_more_search(self):
-        opt, _ = make_opt(explore=4, search=4, parallel=2)
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
         opt.run_search_jobs()
@@ -479,8 +826,8 @@ class TestSearchBudget:
         assert len(opt.values) == 4 + 4 + 4
 
 
-class TestAcquisitionSplit:
-    """The batch split, asserted without paying for a real acqf optimization."""
+class TestAcquisition:
+    """One acquisition per round, asserted without paying for a real optimization."""
 
     @pytest.fixture
     def record(self, monkeypatch):
@@ -495,41 +842,192 @@ class TestAcquisitionSplit:
         monkeypatch.setattr(bo, "optimize_acqf", fake_optimize_acqf)
         return calls
 
-    def test_splits_the_batch_between_the_two_acquisitions(self, record):
-        opt, _ = make_opt(explore=4, search=4, parallel=4)
+    def test_one_call_per_round_for_the_whole_batch(self, record):
+        opt, _ = make_opt(explore=4, iterations=1, parallel=4)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
-        assert record == [
-            (qLogExpectedImprovement.__name__, 2),
-            (qProbabilityOfImprovement.__name__, 2),
-        ]
+        assert record == [(qLogNoisyExpectedImprovement.__name__, 4)]
 
-    def test_an_odd_batch_gives_the_extra_point_to_log_ei(self, record):
-        opt, _ = make_opt(explore=4, search=3, parallel=3)
+    def test_an_odd_batch_is_not_split(self, record):
+        opt, _ = make_opt(explore=4, iterations=1, parallel=3)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
-        assert record == [
-            (qLogExpectedImprovement.__name__, 2),
-            (qProbabilityOfImprovement.__name__, 1),
-        ]
+        assert record == [(qLogNoisyExpectedImprovement.__name__, 3)]
 
-    def test_parallelism_of_one_skips_the_empty_acquisition(self, record):
-        # q=0 is not a legal batch size for optimize_acqf.
-        opt, _ = make_opt(explore=4, search=2, parallel=1)
+    def test_a_parallelism_of_one_still_asks_for_one_point(self, record):
+        opt, _ = make_opt(explore=4, iterations=2, parallel=1)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
-        assert record == [(qLogExpectedImprovement.__name__, 1)] * 2
+        assert record == [(qLogNoisyExpectedImprovement.__name__, 1)] * 2
 
-    def test_a_short_final_round_is_split_too(self, record):
-        opt, _ = make_opt(explore=4, search=5, parallel=3)
+    def test_every_round_asks_for_the_full_parallelism(self, record):
+        """The budget is rounds, so no round is short."""
+        opt, _ = make_opt(explore=4, iterations=3, parallel=3)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
-        assert record == [
-            (qLogExpectedImprovement.__name__, 2),
-            (qProbabilityOfImprovement.__name__, 1),
-            (qLogExpectedImprovement.__name__, 1),
-            (qProbabilityOfImprovement.__name__, 1),
-        ]
+        assert record == [(qLogNoisyExpectedImprovement.__name__, 3)] * 3
+
+    def test_a_timeout_is_passed_to_the_optimizer(self, monkeypatch):
+        """Unbounded, one round can outlast the batch it is choosing points for."""
+        timeouts = []
+
+        def fake_optimize_acqf(acqf, **kwargs):
+            timeouts.append(kwargs.get("timeout_sec"))
+            q, dim = kwargs["q"], kwargs["bounds"].shape[1]
+            return torch.rand(q, dim, dtype=bo.DTYPE), None
+
+        monkeypatch.setattr(bo, "optimize_acqf", fake_optimize_acqf)
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        # Against the run's own setting rather than a literal:
+        # the default lives in the constructor signature,
+        # and pinning its value here would only mean editing this test
+        # whenever it is retuned.
+        assert timeouts == [opt.acqf_timeout_s] * 2
+        assert timeouts[0] is not None
+
+    def test_a_timed_out_proposal_is_still_usable(self):
+        """The limit degrades the proposal; it must not break the round.
+
+        botorch returns its best-so-far rather than raising,
+        so a round that runs out of time still yields a full batch
+        of finite, in-bounds points.
+        """
+        opt, _ = make_opt(explore=4, iterations=1, parallel=3, acqf_timeout_s=0.001)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        searched = opt.points[4:]
+        assert len(searched) == 3
+        for params in searched:
+            for name, value in params.items():
+                assert math.isfinite(value)
+                assert BOX_2D[name].min <= value <= BOX_2D[name].max
+
+    def test_the_sampler_is_passed_explicitly(self, monkeypatch):
+        """Left to botorch the default is larger, and every round pays for it."""
+        shapes = []
+        real_acqf = bo.qLogNoisyExpectedImprovement
+
+        def spy(model, x_baseline, *a, sampler=None, **kw):
+            shapes.append(None if sampler is None else tuple(sampler.sample_shape))
+            return real_acqf(model, x_baseline, *a, sampler=sampler, **kw)
+
+        monkeypatch.setattr(bo, "qLogNoisyExpectedImprovement", spy)
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        # Compared against the run's own setting, not a literal:
+        # the sample count is a tuning knob, and pinning its value here
+        # only means this test has to be edited whenever it is retuned.
+        assert shapes == [(opt.mc_samples,)] * 2
+
+    def test_the_baseline_is_every_point_measured_so_far(self, monkeypatch):
+        """qLogNEI reads its incumbent off these, so they must be up to date."""
+        baselines: list[int] = []
+        real_acqf = bo.qLogNoisyExpectedImprovement
+
+        def spy(model, x_baseline, *a, **kw):
+            baselines.append(len(x_baseline))
+            return real_acqf(model, x_baseline, *a, **kw)
+
+        monkeypatch.setattr(bo, "qLogNoisyExpectedImprovement", spy)
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        # Four exploration points, then those plus the first round's two.
+        assert baselines == [4, 6]
+
+    def test_each_round_reports_how_long_proposing_took(self, capsys):
+        opt, _ = make_opt(explore=4, iterations=3, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+
+        # Three rounds, and exploration proposes nothing --- it is a Sobol'
+        # draw, not an acquisition optimization.
+        proposals = re.findall(r"proposed (\d+) points in ([0-9.]+)s", out)
+        assert len(proposals) == 3
+        assert [int(n) for n, _ in proposals] == [2, 2, 2]
+        assert all(float(t) >= 0.0 for _, t in proposals)
+
+    def test_the_best_so_far_is_reported_after_every_batch(self, capsys):
+        opt, _ = make_opt(explore=4, iterations=3, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+        counts = [int(n) for n in re.findall(r"best after (\d+) points", out)]
+
+        # Once for exploration, then once per search round,
+        # each covering everything measured up to that point.
+        assert counts == [4, 6, 8, 10]
+
+    def test_the_best_is_reported_after_exploration_alone(self, capsys):
+        opt, _ = make_opt(explore=4, iterations=0, parallel=2)
+        opt.run_exploration_jobs()
+
+        out = capsys.readouterr().out
+        _, value = opt.best_point()
+        assert "best after 4 points" in out
+        assert f"{value:.6g}" in out
+
+    def test_reported_parameters_keep_their_type(self, capsys):
+        """An int parameter must not be printed as a float."""
+        opt, _ = make_opt(
+            objective=lambda x, n: {"objective": x + n},
+            space={"x": FloatRange(0.0, 1.0), "n": IntRange(1, 8)},
+            explore=4,
+            iterations=0,
+        )
+        opt.run_exploration_jobs()
+
+        out = capsys.readouterr().out
+        params, _ = opt.best_point()
+        assert f"n={params['n']}" in out, out
+        assert f"n={float(params['n'])}" not in out
+
+    def test_each_fit_reports_its_size_and_duration(self, capsys):
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+
+        # Two rounds, so two fits, each announced before and timed after.
+        assert out.count("fitting GP on") == 2
+        assert out.count("GP fit took") == 2
+
+        # The count is the observations the fit actually sees:
+        # four exploration points, then those plus the first round's two.
+        assert "test: fitting GP on 4 points" in out
+        assert "test: fitting GP on 6 points" in out
+
+        durations = re.findall(r"GP fit took ([0-9.]+)s", out)
+        assert len(durations) == 2
+        assert all(float(d) >= 0.0 for d in durations)
+
+    def test_the_size_is_reported_before_the_fit_runs(self, monkeypatch, capsys):
+        """The count has to be visible even if the fit then hangs or dies."""
+
+        def explode(mll, **kw):
+            raise RuntimeError("fit blew up")
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=2)
+        opt.run_exploration_jobs()
+        monkeypatch.setattr(bo, "fit_gpytorch_mll", explode)
+
+        with pytest.raises(RuntimeError, match="fit blew up"):
+            opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+        assert "test: fitting GP on 4 points" in out
+        assert "GP fit took" not in out, "no duration for a fit that never finished"
 
     def test_the_model_is_refit_every_round(self, record, monkeypatch):
         fits = []
@@ -539,22 +1037,178 @@ class TestAcquisitionSplit:
             "fit_gpytorch_mll",
             lambda mll, **kw: (fits.append(1), real_fit(mll, **kw))[1],
         )
-        opt, _ = make_opt(explore=4, search=6, parallel=2)
+        opt, _ = make_opt(explore=4, iterations=3, parallel=2)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
         assert len(fits) == 3
+
+
+class TestOptimizerQueue:
+    """The fit is a task too, and it goes somewhere else.
+
+    Everything the driver used to do inline now crosses the executor,
+    so what is asserted here is *where* each kind of work was sent
+    and what happens when the far end cannot do it.
+    """
+
+    def test_the_fit_goes_to_the_optimizer_queue(self):
+        opt, executor = make_opt(explore=2, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        # Exploration is objective-only; then each round is one fit
+        # followed by that round's evaluations.
+        assert executor.queues == ["cpu"] * 2 + ["opt", "cpu", "cpu"] * 2
+
+    def test_the_fit_accepts_a_list_of_queues(self):
+        opt, executor = make_opt(
+            explore=2, iterations=1, parallel=1, optimizer_queue=["a", "b"]
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+        assert executor.queues == ["cpu", "cpu", ["a", "b"], "cpu"]
+
+    def test_one_queue_may_serve_both(self):
+        """Nothing deadlocks: the two kinds are never in flight together."""
+        opt, executor = make_opt(
+            explore=2, iterations=1, parallel=2, optimizer_queue="cpu"
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+        assert executor.queues == ["cpu"] * 5
+        assert len(opt.values) == 4
+
+    def test_the_run_carries_its_own_tuning_to_the_worker(self, monkeypatch):
+        """How the run was configured has to decide, not what the worker has.
+
+        The four knobs belong to the optimizer object;
+        reading the module globals on the compute node instead
+        would silently ignore everything the caller asked for.
+        """
+        seen = self._record_kwargs(monkeypatch)
+
+        opt, _ = make_opt(
+            explore=4,
+            iterations=1,
+            parallel=2,
+            num_restarts=3,
+            raw_samples=7,
+            mc_samples=11,
+            acqf_timeout_s=1.5,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert seen == [
+            {
+                "num_restarts": 3,
+                "raw_samples": 7,
+                "mc_samples": 11,
+                "timeout_s": 1.5,
+            }
+        ]
+
+    def test_an_unconfigured_run_carries_its_defaults(self, monkeypatch):
+        """The defaults travel too --- the worker is told, never left to guess."""
+        seen = self._record_kwargs(monkeypatch)
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert seen == [
+            {
+                "num_restarts": opt.num_restarts,
+                "raw_samples": opt.raw_samples,
+                "mc_samples": opt.mc_samples,
+                "timeout_s": opt.acqf_timeout_s,
+            }
+        ]
+
+    @staticmethod
+    def _record_kwargs(monkeypatch) -> list[dict]:
+        """Record what each fit was asked for, without paying for one."""
+        seen: list[dict] = []
+
+        def fake(unit_points, values, batch, **kwargs):
+            seen.append(kwargs)
+            return {
+                bo.CANDIDATES_KEY: [[0.5] * len(unit_points[0]) for _ in range(batch)],
+                bo.FIT_SECONDS_KEY: 0.0,
+                bo.PROPOSE_SECONDS_KEY: 0.0,
+            }
+
+        monkeypatch.setattr(bo, "fit_and_propose", fake)
+        return seen
+
+    def test_a_fit_that_fails_names_the_queue_and_botorch(self, monkeypatch):
+        """The traceback is in a worker log the driver never reads."""
+
+        def explode(mll, **kw):
+            raise RuntimeError("No module named 'botorch'")
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=2)
+        opt.run_exploration_jobs()
+        monkeypatch.setattr(bo, "fit_gpytorch_mll", explode)
+
+        with pytest.raises(RuntimeError, match="'opt'.*botorch") as excinfo:
+            opt.run_search_jobs()
+        assert "search 1/1" in str(excinfo.value)
+
+    def test_an_unusable_result_is_reported_rather_than_unpacked(self, monkeypatch):
+        """A worker running a different slurm-workflows is the way here."""
+        monkeypatch.setattr(bo, "fit_and_propose", lambda *a, **kw: {"points": []})
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=2)
+        opt.run_exploration_jobs()
+
+        with pytest.raises(RuntimeError, match="no 'candidates' in it"):
+            opt.run_search_jobs()
+
+    def test_the_fit_sees_every_point_measured_so_far(self, monkeypatch):
+        """It is given the observations, not a handle to the driver's state."""
+        sizes = []
+        real = bo.fit_and_propose
+
+        def spy(unit_points, values, batch, **kwargs):
+            sizes.append((len(unit_points), len(values)))
+            return real(unit_points, values, batch, **kwargs)
+
+        monkeypatch.setattr(bo, "fit_and_propose", spy)
+
+        opt, _ = make_opt(explore=4, iterations=2, parallel=2)
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert sizes == [(4, 4), (6, 6)]
 
 
 class TestSearchBehaviour:
     """The optimizer minimizes. Botorch maximizes, so this is worth asserting."""
 
     def test_search_moves_toward_the_minimum(self):
-        # f(x) = x on [0, 1]: a flipped sign sends every point to 1.0 instead.
+        # f(x) = x on [0, 1]: a flipped sign sends the search to 1.0 instead.
+        #
+        # Asserted on the *median* search point. Two things this must not be:
+        #
+        # `max(searched)` was the old assertion and no longer holds.
+        # qLogNEI treats the objective as noisy, so it keeps probing away
+        # from the incumbent instead of collapsing onto it;
+        # measured over 15 correct runs
+        # the max reached 1.0, breaching a 0.5 bound 10 times.
+        # That is exploration, not a wrong sign.
+        #
+        # `best_point()` cannot do the job either: with the sign deliberately
+        # flipped the best stays at 0.057, because the Sobol' exploration
+        # already sampled near the minimum and the search never beats it.
+        #
+        # The median separates the two cleanly. Measured over 12 runs each:
+        # correct 0.00 (max 0.00), flipped 1.00 (min 0.97).
         opt, _ = make_opt(
             objective=identity,
             space={"x": FloatRange(0.0, 1.0)},
             explore=4,
-            search=8,
+            iterations=2,
             parallel=2,
         )
         opt.run_exploration_jobs()
@@ -562,11 +1216,10 @@ class TestSearchBehaviour:
         opt.run_search_jobs()
 
         searched = [p["x"] for p in opt.points[n_explored:]]
-        assert max(searched) < 0.5, searched
-        assert opt.best_point()[0]["x"] < 0.5
+        assert statistics.median(searched) < 0.5, searched
 
     def test_search_finds_the_optimum(self):
-        opt, _ = make_opt(objective=sphere, explore=8, search=12, parallel=4)
+        opt, _ = make_opt(objective=sphere, explore=8, iterations=3, parallel=4)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
 
@@ -579,12 +1232,12 @@ class TestSearchBehaviour:
         # A unimodal objective deliberately:
         # on a multimodal one this margin closes at these budgets
         # and the test starts flaking.
-        opt, _ = make_opt(objective=sphere, explore=8, search=16, parallel=4)
+        opt, _ = make_opt(objective=sphere, explore=8, iterations=4, parallel=4)
         opt.run_exploration_jobs()
         opt.run_search_jobs()
         guided = opt.best_point()[1]
 
-        blind, _ = make_opt(objective=sphere, explore=24, search=0)
+        blind, _ = make_opt(objective=sphere, explore=24, iterations=0)
         blind.run_exploration_jobs()
 
         assert guided < blind.best_point()[1]
@@ -597,7 +1250,7 @@ class TestSearchBehaviour:
         offsets = [0.0, 10.0, 25.0]
 
         def objective(x, y, cat):
-            return sphere(x, y) + offsets[cat]
+            return {"objective": sphere(x, y)["objective"] + offsets[cat]}
 
         space = {
             "x": FloatRange(-5.0, 5.0),
@@ -605,7 +1258,7 @@ class TestSearchBehaviour:
             "cat": CategoricalRange(3),
         }
         opt, _ = make_opt(
-            objective=objective, space=space, explore=16, search=16, parallel=4
+            objective=objective, space=space, explore=16, iterations=4, parallel=4
         )
         opt.run_exploration_jobs()
         opt.run_search_jobs()
@@ -642,24 +1295,105 @@ class TestFailures:
 
     def test_a_non_finite_objective_raises(self):
         # NaN silently poisons the GP fit; the failure has to surface here.
-        opt, _ = make_opt(objective=lambda x, y: float("nan"), explore=2)
+        opt, _ = make_opt(objective=lambda x, y: {"objective": float("nan")}, explore=2)
         with pytest.raises(RuntimeError, match="non-finite"):
             opt.run_exploration_jobs()
 
     def test_an_infinite_objective_raises(self):
-        opt, _ = make_opt(objective=lambda x, y: float("inf"), explore=2)
+        opt, _ = make_opt(objective=lambda x, y: {"objective": float("inf")}, explore=2)
         with pytest.raises(RuntimeError, match="non-finite"):
             opt.run_exploration_jobs()
 
     def test_a_non_numeric_objective_raises(self):
-        opt, _ = make_opt(objective=lambda x, y: "not a number", explore=2)
+        opt, _ = make_opt(
+            objective=lambda x, y: {"objective": "not a number"}, explore=2
+        )
         with pytest.raises(RuntimeError, match="not a float"):
             opt.run_exploration_jobs()
 
+    def test_a_bare_number_is_rejected(self):
+        """The old contract returned a float; that must fail loudly, not coerce."""
+        opt, _ = make_opt(objective=lambda x, y: 1.0, explore=2)
+        with pytest.raises(RuntimeError, match="expected a mapping"):
+            opt.run_exploration_jobs()
+
+    def test_a_mapping_without_the_objective_key_is_rejected(self):
+        opt, _ = make_opt(objective=lambda x, y: {"loss": 1.0}, explore=2)
+        with pytest.raises(RuntimeError, match="no 'objective'"):
+            opt.run_exploration_jobs()
+
+    def test_a_configured_key_is_what_the_message_names(self):
+        """The default key is not what a run with its own key is missing."""
+        opt, _ = make_opt(
+            objective=lambda x, y: {"objective": 1.0},
+            explore=2,
+            objective_key="rmse",
+        )
+        with pytest.raises(RuntimeError, match="no 'rmse'"):
+            opt.run_exploration_jobs()
+
+    def test_the_error_names_the_keys_that_were_returned(self):
+        """So a misspelled key is obvious from the message alone."""
+        opt, _ = make_opt(objective=lambda x, y: {"objectiv": 1.0}, explore=2)
+        with pytest.raises(RuntimeError, match=r"\['objectiv'\]"):
+            opt.run_exploration_jobs()
+
     def test_an_integer_objective_is_accepted(self):
-        opt, _ = make_opt(objective=lambda x, y: 1, explore=2)
+        opt, _ = make_opt(objective=lambda x, y: {"objective": 1}, explore=2)
         opt.run_exploration_jobs()
         assert opt.values == [1.0, 1.0]
+
+
+class TestObjectiveKey:
+    """Which key of the result is modelled is the run's to choose."""
+
+    def test_the_default_key_is_objective(self):
+        opt, _ = make_opt()
+        assert opt.objective_key == "objective"
+
+    def test_a_configured_key_is_the_one_modelled(self):
+        """An evaluation that already reports `loss` is searched as it is."""
+
+        def objective(x, y):
+            return {"loss": x * x + y * y, "note": "sphere"}
+
+        opt, _ = make_opt(objective=objective, explore=4, objective_key="loss")
+        opt.run_exploration_jobs()
+
+        assert opt.values == [objective(**p)["loss"] for p in opt.points]
+        _, value = opt.best_point()
+        assert value == min(opt.values)
+
+    def test_the_default_key_is_then_just_another_recorded_key(self):
+        """Only the configured key is modelled; the rest are carried along."""
+
+        def objective(x, y):
+            return {"loss": x * x + y * y, "objective": 999.0}
+
+        opt, _ = make_opt(objective=objective, explore=2, objective_key="loss")
+        opt.run_exploration_jobs()
+
+        assert 999.0 not in opt.values
+        assert opt.best_output()["objective"] == 999.0
+
+    def test_the_search_models_the_configured_key_too(self):
+        """Not just exploration: every round reads the same key."""
+
+        def objective(x, y):
+            return {"score": x * x + y * y}
+
+        opt, _ = make_opt(
+            objective=objective,
+            explore=4,
+            iterations=1,
+            parallel=2,
+            objective_key="score",
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        assert len(opt.values) == 6
+        assert opt.values == [objective(**p)["score"] for p in opt.points]
 
 
 # --------------------------------------------------------------------------
@@ -673,7 +1407,45 @@ class TestBestPoint:
         opt.run_exploration_jobs()
         params, value = opt.best_point()
         assert value == min(opt.values)
-        assert value == sphere(**params)
+        assert value == sphere(**params)["objective"]
+
+    def test_best_output_is_the_whole_mapping(self):
+        opt, _ = make_opt(objective=sphere, explore=8)
+        opt.run_exploration_jobs()
+        params, value = opt.best_point()
+
+        output = opt.best_output()
+        assert output == sphere(**params)
+        assert output["objective"] == value
+        assert output["note"] == "sphere", "keys beyond the objective are kept"
+
+    def test_every_output_is_recorded(self):
+        opt, _ = make_opt(objective=sphere, explore=8)
+        opt.run_exploration_jobs()
+
+        assert len(opt.outputs) == len(opt.values) == len(opt.points)
+        for params, value, output in zip(opt.points, opt.values, opt.outputs):
+            assert output == sphere(**params)
+            assert output["objective"] == value
+
+    def test_a_stored_output_is_a_copy(self):
+        """Mutating what the objective returned must not rewrite the record."""
+        returned = {}
+
+        def objective(x, y):
+            nonlocal returned
+            returned = {"objective": x * x + y * y, "trace": [1, 2, 3]}
+            return returned
+
+        opt, _ = make_opt(objective=objective, explore=2)
+        opt.run_exploration_jobs()
+        recorded = dict(opt.outputs[-1])
+
+        returned["objective"] = -999.0
+        returned["trace"] = []
+
+        assert opt.outputs[-1] == recorded
+        assert opt.best_output() != returned
 
     def test_raises_before_anything_is_evaluated(self):
         opt, _ = make_opt()
@@ -689,7 +1461,7 @@ class TestBestPoint:
         assert 999.0 not in [p["x"] for p in opt.points]
 
     def test_improves_or_holds_across_the_search(self):
-        opt, _ = make_opt(objective=sphere, explore=8, search=8, parallel=4)
+        opt, _ = make_opt(objective=sphere, explore=8, iterations=2, parallel=4)
         opt.run_exploration_jobs()
         after_exploration = opt.best_point()[1]
         opt.run_search_jobs()
@@ -717,11 +1489,24 @@ class TestRealExecutor:
     def test_optimizes_through_a_real_worker(
         self, executor, ds_service_address, tmp_path
     ):
-        explore, search, parallel = 4, 4, 2
-        total = explore + search
+        explore, iterations, parallel = 4, 2, 2
+        # One fit-and-propose task per round on top of the evaluations,
+        # and both kinds go to the one queue this worker serves ---
+        # which is also what pins that a real worker can run the fit at all.
+        total = explore + iterations * (parallel + 1)
 
         opt = BayesOptBotorch(
-            "e2e", BOX_2D, sphere, executor, "cpu", explore, search, parallel, SEED
+            "e2e",
+            BOX_2D,
+            sphere,
+            executor,
+            "cpu",
+            "cpu",
+            explore,
+            parallel,
+            SEED,
+            min_search_iterations=iterations,
+            max_search_iterations=iterations,
         )
 
         # A real worker in a thread:
@@ -738,11 +1523,14 @@ class TestRealExecutor:
             worker.close()
 
         assert not thread.is_alive(), "worker thread did not finish"
-        assert len(opt.values) == total
+        assert len(opt.values) == explore + iterations * parallel
 
         params, value = opt.best_point()
         assert value == min(opt.values)
-        assert math.isclose(value, sphere(**params))
+        assert math.isclose(value, sphere(**params)["objective"])
+        # The whole mapping survives the round trip through the real queue,
+        # not just the number the model was fit on.
+        assert opt.best_output() == {"objective": value, "note": "sphere"}
         assert value < BOX_2D["x"].max ** 2 + BOX_2D["y"].max ** 2
 
     def test_a_raising_objective_surfaces_from_a_real_worker(
@@ -751,7 +1539,19 @@ class TestRealExecutor:
         def boom(x, y):
             raise RuntimeError("worker exploded")
 
-        opt = BayesOptBotorch("e2e-fail", BOX_2D, boom, executor, "cpu", 2, 0, 1, SEED)
+        opt = BayesOptBotorch(
+            "e2e-fail",
+            BOX_2D,
+            boom,
+            executor,
+            "cpu",
+            "cpu",
+            2,
+            1,
+            SEED,
+            min_search_iterations=0,
+            max_search_iterations=0,
+        )
 
         worker = make_worker(ds_service_address, tmp_path / "worker", group="cpu")
         thread = threading.Thread(target=run_worker, args=(worker, 2), daemon=True)
