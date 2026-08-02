@@ -119,12 +119,13 @@ SEARCH_SPACE = {
 #
 # Whatever you ask for is truncated down to a power of two,
 # because that is where a Sobol' sequence is balanced.
-# It is worth doing that arithmetic yourself:
-# 400 here actually evaluates 256,
-# so a round number that looks like ten per worker
-# is really six and a bit.
-# Ask for 512 if you want the pool filled evenly.
-EXPLORATION_POINTS = NUM_NODES * TASKS_PER_NODE
+# It is worth doing that arithmetic yourself,
+# and it is why this is a literal rather than the pool size:
+# the 40 workers below would have asked for 40 and evaluated 32,
+# leaving 8 of them idle for the whole sweep
+# without anything saying so.
+# 64 is the next power of two up --- one full wave, then 24.
+EXPLORATION_POINTS = 64
 
 # Phase 2: the actual optimization.
 # `SEARCH_PARALLELISM` is the batch size, so match it to the pool ---

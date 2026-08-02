@@ -427,6 +427,39 @@ class TestConstruction:
         assert opt.mc_samples >= 1
         assert opt.acqf_timeout_s > 0.0
 
+    def test_an_objective_may_take_the_optimizers_own_argument_names(self):
+        """The leading arguments are positional-only, which is the point of it.
+
+        An objective with its own `seed` is ordinary,
+        and it must reach the objective rather than silently
+        rebinding the exploration design's seed.
+        """
+
+        def objective(x, y, *, seed):
+            return {"objective": x * x + y * y, "seed": seed}
+
+        executor = LocalExecutor()
+        opt = BayesOptBotorch(
+            "t",
+            BOX_2D,
+            objective,
+            as_executor(executor),
+            "cpu",
+            "opt",
+            2,
+            1,
+            7,
+            min_search_iterations=0,
+            max_search_iterations=0,
+            seed=99,
+        )
+        opt.run_exploration_jobs()
+
+        assert opt.seed == 7
+        assert opt.extra_objective_kwargs == {"seed": 99}
+        assert all(kw["seed"] == 99 for kw in executor.kwargs)
+        assert opt.best_output()["seed"] == 99
+
     def test_rejects_extra_kwargs_that_shadow_a_parameter(self):
         # Silently overriding a searched parameter
         # would make the recorded point and the evaluated point disagree.
@@ -731,6 +764,36 @@ class TestEarlyStopping:
         opt.run_search_jobs()
 
         assert rounds_run(opt, 4) == 2
+
+    def test_the_progress_line_counts_towards_the_real_stop(self, capsys):
+        """A floor outlasting patience must not print a ratio past its own end.
+
+        These are the shipped defaults, so it is the common case:
+        counting `stalled` against `patience` alone reaches "(4/3)",
+        and then claims a 3-round streak for a search that stalled 5 times.
+        """
+        opt, _ = make_opt(
+            objective=constant,
+            explore=4,
+            parallel=2,
+            min_search_iterations=5,
+            max_search_iterations=30,
+            patience=3,
+        )
+        opt.run_exploration_jobs()
+        opt.run_search_jobs()
+
+        out = capsys.readouterr().out
+
+        # The gap shrinks by one a round, and the floor is what sets it
+        # --- patience alone would have run out after three.
+        assert re.findall(r"(\d+) in a row, (\d+) more to stop", out) == [
+            ("1", "4"),
+            ("2", "3"),
+            ("3", "2"),
+            ("4", "1"),
+        ]
+        assert "stopping after 5 rounds --- 5 in a row" in out
 
     def test_it_says_why_it_stopped(self, capsys):
         opt, _ = make_opt(
@@ -1162,7 +1225,46 @@ class TestOptimizerQueue:
         opt, _ = make_opt(explore=4, iterations=1, parallel=2)
         opt.run_exploration_jobs()
 
-        with pytest.raises(RuntimeError, match="no 'candidates' in it"):
+        with pytest.raises(RuntimeError, match="no 'candidates'"):
+            opt.run_search_jobs()
+
+    def test_a_result_missing_only_the_timings_is_reported_too(self, monkeypatch):
+        """Every key the driver goes on to read, not just the candidates.
+
+        Half-right output is what version skew actually looks like,
+        and reaching the timings as a bare KeyError
+        would skip the message written for exactly this.
+        """
+        monkeypatch.setattr(
+            bo,
+            "fit_and_propose",
+            lambda unit_points, values, batch, **kw: {
+                bo.CANDIDATES_KEY: [[0.5] * len(unit_points[0])] * batch
+            },
+        )
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=2)
+        opt.run_exploration_jobs()
+
+        with pytest.raises(RuntimeError, match="'fit_seconds', 'propose_seconds'"):
+            opt.run_search_jobs()
+
+    def test_a_batch_that_is_not_the_full_width_is_rejected(self, monkeypatch):
+        """A short round would otherwise pass as a normal one."""
+        monkeypatch.setattr(
+            bo,
+            "fit_and_propose",
+            lambda unit_points, values, batch, **kw: {
+                bo.CANDIDATES_KEY: [[0.5] * len(unit_points[0])] * (batch - 1),
+                bo.FIT_SECONDS_KEY: 0.0,
+                bo.PROPOSE_SECONDS_KEY: 0.0,
+            },
+        )
+
+        opt, _ = make_opt(explore=4, iterations=1, parallel=3)
+        opt.run_exploration_jobs()
+
+        with pytest.raises(RuntimeError, match=r"proposed 2 points.*not the 3"):
             opt.run_search_jobs()
 
     def test_the_fit_sees_every_point_measured_so_far(self, monkeypatch):

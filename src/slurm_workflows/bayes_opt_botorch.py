@@ -225,6 +225,8 @@ class BayesOptBotorch:
         num_exploration_points: int,
         search_parallelism: int,
         seed: int | None = None,
+        /,
+        *,
         min_search_iterations: int = 5,
         max_search_iterations: int = 30,
         patience: int = 3,
@@ -259,6 +261,12 @@ class BayesOptBotorch:
         search_parallelism: number of points evaluated per search round.
         seed: seed for the exploration design.
             Omit it to draw one from os.urandom.
+
+        Everything up to and including the seed is positional-only,
+        which is what leaves those names free for the objective:
+        an objective that takes its own `seed` or `name`
+        still receives it through extra_objective_kwargs.
+        Everything after is keyword-only.
 
         The search runs between min_search_iterations
         and max_search_iterations rounds,
@@ -513,16 +521,36 @@ class BayesOptBotorch:
                 f"--- {task.output}"
             )
 
+        # Every key this reads below, not just the candidates:
+        # a worker one version behind is exactly what this message is for,
+        # and it would otherwise reach the timings as a bare KeyError.
         result = task.output
-        if not isinstance(result, Mapping) or CANDIDATES_KEY not in result:
+        expected = (CANDIDATES_KEY, FIT_SECONDS_KEY, PROPOSE_SECONDS_KEY)
+        if isinstance(result, Mapping):
+            missing = [key for key in expected if key not in result]
+        else:
+            missing = list(expected)
+        if missing:
             raise RuntimeError(
                 f"{self.name}: the optimizer queue returned {result!r} "
-                f"during {desc}, with no {CANDIDATES_KEY!r} in it; "
+                f"during {desc}, with no "
+                f"{', '.join(repr(key) for key in missing)} in it; "
                 "check that its workers run the same slurm-workflows "
                 "as this driver"
             )
 
         candidates = result[CANDIDATES_KEY]
+
+        # Every round is the full width of the pool.
+        # A short batch would quietly narrow the round instead,
+        # which is a worse way to find out the far end disagrees.
+        if len(candidates) != batch:
+            raise RuntimeError(
+                f"{self.name}: the optimizer queue proposed "
+                f"{len(candidates)} points during {desc}, not the {batch} "
+                "asked for"
+            )
+
         print(
             f"{self.name}: GP fit took {result[FIT_SECONDS_KEY]:.2f}s, "
             f"proposed {len(candidates)} points in "
@@ -577,23 +605,37 @@ class BayesOptBotorch:
                 continue
 
             stalled += 1
-            print(
-                f"{self.name}: round {iteration} improved by less than "
-                f"{self.min_improvement:.0%} ({stalled}/{self.patience})",
-                flush=True,
+
+            # Two things hold the search open,
+            # and a stalled round ends it only once both have given way:
+            # the streak has to reach `patience`,
+            # and the round count has to reach the floor.
+            # Reporting the larger of the two gaps
+            # is what keeps the progress line honest
+            # when the floor outlasts the streak
+            # --- a bare `stalled`/`patience` ratio runs past its own
+            # denominator, and says the search should have stopped rounds ago.
+            remaining = max(
+                self.patience - stalled,
+                self.min_search_iterations - iteration,
             )
 
-            if iteration < self.min_search_iterations:
-                continue
-
-            if stalled >= self.patience:
+            if remaining > 0:
                 print(
-                    f"{self.name}: stopping after {iteration} rounds "
-                    f"--- {self.patience} in a row without a "
-                    f"{self.min_improvement:.0%} improvement",
+                    f"{self.name}: round {iteration} improved by less than "
+                    f"{self.min_improvement:.0%} "
+                    f"--- {stalled} in a row, {remaining} more to stop",
                     flush=True,
                 )
-                return
+                continue
+
+            print(
+                f"{self.name}: stopping after {iteration} rounds "
+                f"--- {stalled} in a row without a "
+                f"{self.min_improvement:.0%} improvement",
+                flush=True,
+            )
+            return
 
     def _improved_enough(self, previous: float, current: float) -> bool:
         """Whether `current` beats `previous` by at least `min_improvement`.

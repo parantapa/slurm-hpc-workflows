@@ -163,17 +163,24 @@ reached even if the search is still improving.
 The search says which of the two ended it:
 
 ```
-lr-search: round 7 improved by less than 5% (1/3)
-lr-search: round 8 improved by less than 5% (2/3)
-lr-search: round 9 improved by less than 5% (3/3)
+lr-search: round 7 improved by less than 5% --- 1 in a row, 2 more to stop
+lr-search: round 8 improved by less than 5% --- 2 in a row, 1 more to stop
 lr-search: stopping after 9 rounds --- 3 in a row without a 5% improvement
 ```
 
-Every fit prints how many points it is fitting and how long it took:
+"more to stop" counts whichever bound is still binding —
+the streak that has to reach `patience`,
+or the rounds that have to reach `min_search_iterations`,
+whichever is further away.
+Early in a run with a floor above `patience` it is the floor,
+which is why the number can be larger than `patience` itself.
+
+Every round prints how many points the fit is over,
+then what the fit and the proposal each cost:
 
 ```
 lr-search: fitting GP on 64 points ...
-lr-search: GP fit took 0.21s
+lr-search: GP fit took 0.21s, proposed 8 points in 1.03s
 ```
 
 The count is announced before the fit starts,
@@ -289,5 +296,5 @@ that a better batch is worth minutes of thinking.
 
 [`examples/example_optimize_himmelblau.py`](../examples/example_optimize_himmelblau.py)
 runs the whole thing on a cluster,
-with a `bii` pool for the objective and a one-worker `opt` pool for the fit.
+with an `eval` pool for the objective and a one-worker `opt` pool for the fit.
 It gains a batch chosen jointly and pays for it with a barrier per round.
