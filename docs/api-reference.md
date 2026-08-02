@@ -51,8 +51,9 @@ They check this twice, for two different failure modes.
 **Before waiting at all**, and without asking Slurm,
 they require that `scale_workers` has been called
 for at least one of each pending task's queues.
-This catches the two mistakes that would otherwise cost you a minute of
-staring at a progress bar: forgetting to scale a group,
+This catches the two mistakes
+that would otherwise cost you a minute of staring at a progress bar:
+forgetting to scale a group,
 and mistyping a queue name (queue names are not validated at `submit` time).
 The error is raised before any result is yielded,
 so a finished task in the same batch cannot mask a stranded one.

@@ -91,11 +91,11 @@ def ds_service_address() -> Generator[str]:
     `DsServiceServer` owns finding the binary, picking a free port,
     waiting for the socket and shutting the process down,
     so none of that is reimplemented here.
-    Bound to loopback rather than the wildcard address:
+    Bound to the loopback interface rather than a routable one:
     nothing outside this machine should reach a test's queue.
     """
     try:
-        server = DsServiceServer(host="127.0.0.1")
+        server = DsServiceServer(interface="lo")
     except FileNotFoundError:
         pytest.skip(
             "ds-service executable not found; "

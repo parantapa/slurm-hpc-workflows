@@ -109,18 +109,31 @@ documenting each template's required kwargs
 - **`unit_points` holds the point actually evaluated**,
   re-standardized *after* rounding — never the continuous proposal.
   Otherwise the GP is told about a location the objective never ran at.
-- **The batch split is exactly** `num_ei = batch - batch // 2`
-  and `num_pi = batch // 2`,
-  and a `q == 0` acquisition is skipped
-  — zero is not a legal batch size for `optimize_acqf`.
+- **One acquisition, one `optimize_acqf` call per round**,
+  asking for the whole batch.
+  `qLogNoisyExpectedImprovement` takes `X_baseline`
+  — every point measured so far — rather than a `best_f` scalar,
+  so that argument has to be the current `unit_points`, not a stale copy.
+- **Ask for the batch jointly, never `sequential=True`.**
+  It is the usual advice for large batches and it is wrong here: measured
+  10–15x *slower* on a low-dimensional space, because the greedy path pays
+  the restart cost once per point instead of once per batch.
 - **Ranges clamp in `unstandardize`**,
   because `optimize_acqf` can return a point a hair outside the bounds.
 - **Keep this module out of the package `__init__.py`**,
   so `import slurm_workflows` works without botorch installed.
-- `NUM_RESTARTS` / `RAW_SAMPLES` are module-level,
-  and `optimize_acqf` / `fit_gpytorch_mll` are called through module globals;
-  the tests monkeypatch those to assert the batch split
+- `NUM_RESTARTS` / `RAW_SAMPLES` are module-level, and `optimize_acqf` /
+  `fit_gpytorch_mll` / `qLogNoisyExpectedImprovement` are called through
+  module globals;
+  the tests monkeypatch those to assert what was asked for,
   without paying for a real acquisition optimization.
+- **`test_search_moves_toward_the_minimum` asserts the *median* search
+  point**, not the max and not `best_point()`. Both of those look like
+  better guards and neither works:
+  qLogNEI explores away from the incumbent
+  so the max hits 1.0 on correct runs,
+  and exploration alone lands near the minimum
+  so `best_point()` passes even with the sign flipped.
 
 ### Slurm interaction (`slurm_utils.py`)
 

@@ -38,8 +38,8 @@ NoOutput = object()
 
 POLL_INTERVAL_S: float = 0.1
 
-# How often `_as_completed` checks that pending tasks still have
-# a pilot job that could run them.
+# How often `_as_completed` checks
+# that pending tasks still have a pilot job that could run them.
 # Kept well above POLL_INTERVAL_S because each check costs an `squeue` call.
 LIVE_QUEUE_CHECK_INTERVAL_S: float = 60.0
 
@@ -417,7 +417,7 @@ class SlurmPilotExecutor:
     def _raise_if_no_live_queue(self, pending: list[Task]) -> None:
         """Fail fast on pending tasks whose queues have no pilot job left.
 
-        A task is stranded when none of the queues it was submitted to
+        A task is stranded when none of its queues
         still has a job on the cluster:
         nothing is left to pull it,
         so waiting on it would block until the caller gives up.

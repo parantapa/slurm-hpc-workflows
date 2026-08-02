@@ -25,7 +25,7 @@ dependencies = [
     "platformdirs",
     "cloudpickle",
     "typeguard>=3",
-    "ds-service-client>=2.1.0"
+    "ds-service-client>=2.2.0"
 ]
 
 [project.optional-dependencies]

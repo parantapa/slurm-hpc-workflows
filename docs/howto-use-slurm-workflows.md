@@ -146,12 +146,10 @@ You can start one on the login node:
 from ds_service_client import DsServiceServer
 from slurm_workflows import SlurmPilotExecutor
 
-with DsServiceServer(host="0.0.0.0", port=5051) as ds:
+with DsServiceServer(interface="ib0", port=5051) as ds:
     ds.wait_until_ready()      # blocks until it accepts connections
 
-    executor = SlurmPilotExecutor(
-        server_address=ds.get_address_by_interface("ib0")
-    )
+    executor = SlurmPilotExecutor(server_address=ds.address)
     ...
 ```
 
@@ -164,13 +162,14 @@ lands in a gRPC reconnect backoff and is slow to recover.
 Omit `port` to get an arbitrary free one.
 
 The server must be reachable from the compute nodes,
-so bind it to an address the workers can route to (`0.0.0.0` above),
-and pass workers a routable host
-— a login node's cluster-internal IP, not `localhost`.
-`get_address_by_interface("ib0")` picks that node's Infiniband address;
-if the interface isn't there it warns and falls back to `127.0.0.1`,
-which compute nodes cannot reach, so treat that warning as an error
-rather than letting the workers fail to connect later.
+so it is bound to the IPv4 address of the `interface` you name
+— `ib0` above, the login node's Infiniband interface —
+and `ds.address` is the `host:port` the workers then connect to.
+Naming an interface that does not exist on that node,
+or that has no IPv4 address, raises `ValueError` at construction
+rather than starting a server the workers cannot reach.
+Use the loopback interface (`lo`) only for a server
+that nothing outside the node needs to talk to.
 
 `ds_service_bin` (or the `DS_SERVICE_BIN` environment variable)
 sets how the server is started, and may be a whole command line

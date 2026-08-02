@@ -54,7 +54,7 @@ Paths are relative to [`tests/`](../tests).
 | `test_slurm_utils.py` | `sbatch`/`squeue`/`scancel` wrappers, `get_clean_environ` |
 | `test_executor.py` | `SlurmPilotExecutor`: worker groups, scaling, submit/poll, lifecycle |
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
-| `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, batch split, search behaviour (skips without botorch) |
+| `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, acquisition, search behaviour (skips without botorch) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |
@@ -89,8 +89,12 @@ Paths are relative to [`tests/`](../tests).
   They are stochastic
   (torch's global RNG is left unseeded, so each run is a fresh sample),
   and their margins were chosen from measured spreads:
-  the monotone case puts every search point below 0.1 against a 0.5 threshold,
+  the monotone case has a *median* search point of 0.00 against a 0.5
+  threshold, where flipping the sign puts it at 0.97+,
   and `test_search_beats_random_search` won 12/12 with a 4.6x margin.
+  Assert on that median rather than the max: `qLogNoisyExpectedImprovement`
+  deliberately probes away from the incumbent, so single points reach 1.0
+  on perfectly correct runs.
   All four use *unimodal* objectives on purpose
   — an earlier Himmelblau version of the random-search comparison
   lost 1 run in 10.
@@ -105,5 +109,9 @@ Paths are relative to [`tests/`](../tests).
 - **Server lifecycle belongs to `ds-service-client`, not to `conftest`.**
   Finding the binary, picking a free port, waiting for the socket
   and terminating the process are all `DsServiceServer`'s job.
-  `conftest` only chooses the host and translates a missing binary
-  into a skip.
+  `conftest` only chooses the interface to bind
+  and translates a missing binary into a skip.
+- **The test server binds `lo`.**
+  `DsServiceServer` takes an interface name rather than an address,
+  and loopback is the one a test wants:
+  a test's queue is not reachable from outside the machine.
