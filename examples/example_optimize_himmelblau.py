@@ -1,30 +1,22 @@
 """Batch Bayesian optimization on Rivanna's BII cluster.
 
-A follow-up to `example_compute_pi.py`.
-That example covers the machinery this one reuses without comment ---
+A follow-up to `example_compute_pi.py`,
+which covers the machinery this one reuses without comment:
 starting `ds-service`, the `ib0` address, `setup_script`,
 what the `sbatch` arguments mean, and how cleanup works.
-Read it first.
 
-What is different here is *why* work is submitted.
-
-`example_compute_pi.py` knew every task up front:
-four thousand independent slices, submitted in one go,
-and the only question was how fast the pool could compute them.
-An optimization workflow does not work that way.
-You are searching for the input that minimizes some expensive function,
-you cannot afford to evaluate the whole space,
-and which point is worth trying next
-depends on what the previous points returned.
-That makes the run a sequence of *rounds*
-rather than one flat pile of tasks.
+The difference is how work is chosen.
+`example_compute_pi.py` knew every task up front and submitted them in one go.
+An optimization run cannot: which point is worth trying next
+depends on what the previous points returned,
+so the run is a sequence of *rounds*.
 
 `BayesOptBotorch` fits a Gaussian process to everything measured so far,
-asks it for a whole batch of promising points at once,
+asks it for a whole batch of points at once,
 evaluates that batch across the pilot pool,
 refits, and repeats.
-The batch is what keeps the cluster busy:
-a one-point-at-a-time optimizer would leave 9 of 10 workers idle.
+The batch is what keeps the pool busy:
+a one-point-at-a-time optimizer would leave all but one worker idle.
 
 Where the work happens:
 
@@ -33,19 +25,18 @@ Where the work happens:
 * the model fit and the acquisition optimization go to a *second* pool,
   `opt`, as one task per round.
 
-That is two worker groups rather than one because the two jobs
-want different nodes.
+Two worker groups rather than one, because the two want different nodes.
 An objective evaluation is one cheap single-threaded call,
-40 of them at a time;
+40 at a time;
 the fit is a single task that wants cores and memory,
 and gets more expensive every round as the model grows.
-`optimizer_queue="eval"` would work --- the fit and the evaluations
-never run at the same time --- but the fit would then wait
-for a slot in a pool sized for the objective.
+`optimizer_queue="eval"` would also work
+--- the fit and the evaluations never run at the same time ---
+but the fit would wait for a slot in a pool sized for the objective.
 
-botorch is needed on the login node (to import the optimizer)
-and in the `opt` group's environment (which now runs the fit).
-The `eval` workers need neither: they only call the objective.
+botorch is needed on the login node, to import the optimizer,
+and in the `opt` group's environment, which runs the fit.
+The `eval` workers need neither.
 
 Run it from a Rivanna login node:
 
@@ -81,10 +72,9 @@ SBATCH_ARGS = [
 ]
 
 # One worker, and nothing else on the node.
-# `--ntasks-per-node=1` because the fit is a single task
-# --- a second worker here would sit idle all run ---
-# and the cores are worth having:
-# torch threads the linear algebra the GP fit is made of.
+# `--ntasks-per-node=1` because the fit is a single task:
+# a second worker here would sit idle all run.
+# The cores still matter --- torch threads the GP fit's linear algebra.
 OPTIMIZER_SBATCH_ARGS = [
     "--account=bii_nssac",
     "--partition=bii --nodes=1",
@@ -94,14 +84,12 @@ OPTIMIZER_SBATCH_ARGS = [
 
 JOB_NAME = "himmelblau"
 
-# Scrambling the exploration design is random,
-# but seeded: the same seed redraws the same starting points,
-# so a rerun is comparable and a different seed explores fresh ground.
-#
-# Pinning it here is the habit worth having for work you intend to compare.
-# The argument is optional:
-# leave it out and a seed is drawn from os.urandom,
-# then printed so the run can still be repeated afterwards.
+# The exploration design is scrambled, but seeded:
+# the same seed redraws the same starting points,
+# a different seed explores fresh ground.
+# The argument is optional --- leave it out
+# and a seed is drawn from os.urandom and printed,
+# so the run can still be repeated afterwards.
 SEED = 20260730
 
 # One entry per objective argument, keyed by the argument's *name*.
@@ -114,21 +102,18 @@ SEARCH_SPACE = {
 }
 
 # Phase 1: a space-filling Sobol' sweep, evaluated in a single batch.
-# It buys the model something to fit before it starts making decisions;
-# a GP with no observations has no opinion worth acting on.
+# It gives the model something to fit before it starts making decisions.
 #
-# Whatever you ask for is truncated down to a power of two,
+# The count is truncated down to a power of two,
 # because that is where a Sobol' sequence is balanced.
-# It is worth doing that arithmetic yourself,
-# and it is why this is a literal rather than the pool size:
-# the 40 workers below would have asked for 40 and evaluated 32,
-# leaving 8 of them idle for the whole sweep
-# without anything saying so.
-# 64 is the next power of two up --- one full wave, then 24.
+# Hence a literal rather than the pool size:
+# 40 workers would ask for 40, evaluate 32,
+# and leave 8 idle for the whole sweep without saying so.
+# 64 is the next power of two up: one full wave, then 24.
 EXPLORATION_POINTS = 64
 
-# Phase 2: the actual optimization.
-# `SEARCH_PARALLELISM` is the batch size, so match it to the pool ---
+# Phase 2: the optimization itself.
+# `SEARCH_PARALLELISM` is the batch size, so match it to the pool:
 # a bigger batch queues behind the workers,
 # a smaller one leaves workers idle.
 SEARCH_PARALLELISM = NUM_NODES * TASKS_PER_NODE
@@ -136,14 +121,13 @@ SEARCH_PARALLELISM = NUM_NODES * TASKS_PER_NODE
 # The search budget is counted in *rounds*, not points:
 # each round fits the model once and evaluates SEARCH_PARALLELISM points.
 #
-# It stops on whichever comes first
-# --- the ceiling, or the search ceasing to pay.
+# It stops on whichever comes first, the ceiling or the early stop.
 # A round that fails to beat the incumbent by MIN_IMPROVEMENT is stalled;
 # PATIENCE stalled rounds in a row end the search.
 # MIN_SEARCH_ITERATIONS rounds always run,
 # so a slow start is not mistaken for a finished search.
 # Stalled rounds below that floor still count towards PATIENCE
-# --- they just cannot be the round that stops the search ---
+# but cannot be the round that stops the search,
 # so the earliest stop is max(MIN_SEARCH_ITERATIONS, PATIENCE) rounds.
 MIN_SEARCH_ITERATIONS = 5
 MAX_SEARCH_ITERATIONS = 30
@@ -167,13 +151,11 @@ def himmelblau(x, y):
     It returns a mapping, not a bare number.
     "objective" is mandatory and is the value to be **minimized**
     --- negate a score you would rather maximize.
-    Everything else is carried along untouched:
-    the optimizer models only "objective" but records the whole mapping,
-    so an expensive evaluation can report the things you will want later
-    --- a runtime, a checkpoint path, intermediate metrics ---
-    without having to write them somewhere else itself.
+    The optimizer models only "objective" but records the whole mapping,
+    so an evaluation can also report a runtime,
+    a checkpoint path, or intermediate metrics.
 
-    Standing in for something slow here.
+    This stands in for something slow.
     Bayesian optimization earns its overhead
     when one evaluation costs minutes;
     on arithmetic this cheap the model fits dominate the runtime.
@@ -234,17 +216,16 @@ def main():
             #
             # Neither needs a progress report written here:
             # the optimizer prints the best point after every batch,
-            # plus how long each model fit and each proposal took.
-            # Watch those three together --- if the best stops moving
-            # while the fits keep growing, the budget is being spent
-            # on the model rather than on the search.
+            # plus how long each fit and each proposal took.
+            # A best that stops moving while the fits keep growing
+            # means the budget is going to the model, not the search.
             print(
                 f"\n=== exploration: {opt.num_exploration_points} points, one batch ==="
             )
             opt.run_exploration_jobs()
 
             # Each round is a barrier: fit, propose a batch, evaluate, refit.
-            # That is the price of choosing the batch jointly,
+            # That is the cost of choosing the batch jointly,
             # and why the round should be as wide as the pool.
             print(
                 f"\n=== search: up to {MAX_SEARCH_ITERATIONS} rounds"

@@ -111,23 +111,28 @@ documenting each template's required kwargs
   Otherwise the GP is told about a location the objective never ran at.
 - **The fit runs on a worker, not on the driver.**
   `fit_and_propose` is submitted to `optimizer_queue`
-  as one task per round — the fit and the acquisition together,
-  because shipping a fitted GP back to the driver
+  as one task per round, the fit and the acquisition together:
+  shipping a fitted GP back to the driver
   would cost more than the fit did.
-  Keep it a module-level function taking and returning plain Python:
-  cloudpickle then sends it by reference,
+  Keep it a module-level function taking and returning plain Python,
+  so cloudpickle sends it by reference
   and no torch object has to survive a hop between hosts.
   Its workers need botorch; `objective_queue`'s do not.
 - **The four acquisition knobs belong to the run, not to the process.**
   `num_restarts` / `raw_samples` / `mc_samples` / `acqf_timeout_s`
   are `__init__` arguments with literal defaults,
   kept on the instance and passed to every `fit_and_propose` task.
-  There is nothing module-level left to rebind, and that is the point:
-  a value read inside `fit_and_propose` would be the *worker's*,
-  silently ignoring how the run was configured.
+  A value read inside `fit_and_propose` would be the *worker's*,
+  ignoring how the run was configured.
   Tests assert them by constructing with them
   (`make_opt(acqf_timeout_s=...)`) or against `opt.<knob>`,
   never against a literal.
+- **The stall counter runs from round 1;
+  `min_search_iterations` gates the stop, not the counting.**
+  Report the gap to the stop as
+  `max(patience - stalled, min_search_iterations - iteration)`:
+  a bare `stalled`/`patience` ratio runs past its own denominator
+  whenever the floor outlasts the streak, which the defaults do.
 - **One acquisition, one `optimize_acqf` call per round**,
   asking for the whole batch.
   `qLogNoisyExpectedImprovement` takes `X_baseline`
@@ -149,8 +154,8 @@ documenting each template's required kwargs
   in the test's own process — patching reaches the fit
   only for as long as that stays true.
 - **`test_search_moves_toward_the_minimum` asserts the *median* search
-  point**, not the max and not `best_point()`. Both of those look like
-  better guards and neither works:
+  point**, not the max and not `best_point()`.
+  Neither of those works:
   qLogNEI explores away from the incumbent
   so the max hits 1.0 on correct runs,
   and exploration alone lands near the minimum

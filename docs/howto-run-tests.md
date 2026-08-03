@@ -113,5 +113,4 @@ Paths are relative to [`tests/`](../tests).
   and translates a missing binary into a skip.
 - **The test server binds `lo`.**
   `DsServiceServer` takes an interface name rather than an address,
-  and loopback is the one a test wants:
-  a test's queue is not reachable from outside the machine.
+  and loopback keeps a test's queue unreachable from outside the machine.

@@ -4,8 +4,7 @@
 fits one Gaussian process to everything measured so far
 and asks for a *batch* of points at once,
 chosen jointly so they do not stack on the same spot.
-That is the shape a pilot pool wants —
-`search_parallelism` workers busy on one round,
+A round is `search_parallelism` workers busy at once,
 then one model fit, then the next round.
 
 botorch is an optional dependency:
@@ -77,22 +76,17 @@ so a closure or a lambda is fine.
 **It returns a mapping, not a bare number.**
 One key is mandatory: `objective`, the float to be **minimized**
 — negate a score you would rather maximize.
-Every other key is carried along untouched.
-Only `objective` is modelled, but the whole mapping is recorded,
-so an expensive evaluation can report the things you will want afterwards
-— a runtime, a checkpoint path, the metrics you did not optimize for —
-without having to write them somewhere else itself.
+Only `objective` is modelled; the whole mapping is recorded,
+so an evaluation can also report a runtime, a checkpoint path,
+or metrics it did not optimize for.
 A bare float, a mapping without an `objective` key,
 or an `objective` that is not a finite float
 each raise rather than being coerced.
 
-`objective_key="rmse"` changes which key is read,
-and nothing else about the contract:
-the named key is modelled, every other key is recorded.
-It is there for the evaluation you already have —
-one that reports `loss` or `rmse` and is shared with code
-that expects to keep calling it that —
-so it can be searched as it is rather than wrapped to rename a key.
+`objective_key="rmse"` changes which key is read
+and nothing else: the named key is modelled,
+every other key is recorded.
+Use it for an objective that already reports under another name.
 
 **Two phases.** `run_exploration_jobs` submits a scrambled Sobol' design
 in one batch — a space-filling sweep that costs one round trip
@@ -110,19 +104,17 @@ then printed and kept in `opt.seed`:
 lr-search: no seed given, drew 1778551843323245695 --- pass it back to repeat this run
 ```
 
-So an exploratory run still costs nothing to start,
-and is still repeatable afterwards —
-pass that number back as the seed and you get the same design.
+Pass that number back as the seed to repeat the design.
 It is drawn from `os.urandom` rather than the `random` module,
 so seeding the global RNG elsewhere in your script
-cannot quietly make every "unseeded" run identical.
+does not make every "unseeded" run identical.
 All arguments up to and including the seed are positional-only,
-which is what frees `**extra_objective_kwargs`
+which frees `**extra_objective_kwargs`
 to use the optimizer's own parameter names.
 They may not shadow a key of `space`, which is rejected up front.
 
-`run_search_jobs` then runs rounds until the search stops paying. Each round:
-fit a `SingleTaskGP` to every point measured so far,
+`run_search_jobs` then runs rounds until the search stops improving.
+Each round: fit a `SingleTaskGP` to every point measured so far,
 ask `qLogNoisyExpectedImprovement` for the whole batch in one call,
 submit all of them, and wait.
 
@@ -130,14 +122,13 @@ The batch is chosen jointly rather than one point at a time,
 so the proposals do not stack on the same spot.
 The "noisy" variant takes the points already evaluated
 instead of a single best-so-far value,
-and reads the incumbent off the posterior at those points ---
+and reads the incumbent off the posterior at those points,
 so an evaluation that came back lucky
-cannot become a target the search then chases.
-It also means the acquisition carries every point measured so far,
+does not become a target the search chases.
+It also carries every point measured so far,
 which is why its cost grows with the run.
 
-**Early stopping.** How many rounds run is not fixed up front,
-because how many are worth running is not knowable up front.
+**Early stopping.** The number of rounds is not fixed up front.
 A round is *stalled* when it fails to improve the best value
 by `min_improvement` — a fraction,
 measured against the magnitude of the incumbent,
@@ -145,7 +136,7 @@ so the same setting means the same thing
 whether the objective is scaled in seconds or in dollars.
 `patience` stalled rounds **in a row** end the search;
 a round that improves resets the count,
-so this bounds a run of bad rounds rather than their total.
+so this bounds a run of stalled rounds rather than their total.
 
 Two bounds fence that in.
 `min_search_iterations` rounds always run,
@@ -153,14 +144,13 @@ so a search that starts slowly is not mistaken for a finished one.
 It is a floor on rounds *run*, not on rounds counted:
 a stalled round below it still counts towards `patience`,
 it just cannot be the round that ends the search.
-So a search that never improves at all stops
+A search that never improves therefore stops
 at `min_search_iterations` exactly,
-and the earliest possible stop
-is max(`min_search_iterations`, `patience`) rounds.
+and the earliest stop is max(`min_search_iterations`, `patience`) rounds.
 `max_search_iterations` is a hard ceiling,
 reached even if the search is still improving.
 
-The search says which of the two ended it:
+The search reports which bound ended it:
 
 ```
 lr-search: round 7 improved by less than 5% --- 1 in a row, 2 more to stop
@@ -168,12 +158,12 @@ lr-search: round 8 improved by less than 5% --- 2 in a row, 1 more to stop
 lr-search: stopping after 9 rounds --- 3 in a row without a 5% improvement
 ```
 
-"more to stop" counts whichever bound is still binding —
+"more to stop" counts whichever bound is still binding:
 the streak that has to reach `patience`,
 or the rounds that have to reach `min_search_iterations`,
 whichever is further away.
-Early in a run with a floor above `patience` it is the floor,
-which is why the number can be larger than `patience` itself.
+With a floor above `patience` it is the floor,
+so the number can exceed `patience` itself.
 
 Every round prints how many points the fit is over,
 then what the fit and the proposal each cost:
@@ -183,11 +173,11 @@ lr-search: fitting GP on 64 points ...
 lr-search: GP fit took 0.21s, proposed 8 points in 1.03s
 ```
 
-The count is announced before the fit starts,
-so it is on screen even if the fit is the thing that stalls.
-Watch the duration: it grows superlinearly with the number of observations,
-so a search that slows down round after round
-is spending its time in the model rather than in your objective.
+The count is printed before the fit starts,
+so it is on screen even if the fit is what stalls.
+Fit duration grows superlinearly with the number of observations:
+a search that slows round after round
+is spending its time in the model rather than in the objective.
 
 Both phases block until every point in flight has come back.
 A worker that raises does not raise on the driver —
@@ -236,27 +226,24 @@ A search round is two kinds of task on two queues:
 | `optimizer_queue` | one `fit_and_propose` — the GP fit and the acquisition optimization | botorch, cores, and memory for a GP over every point measured so far |
 
 They are separate arguments because the two want different nodes.
-An evaluation is one call, and there are `search_parallelism` at a time;
-the fit is a single task whose cost grows with the run
-— superlinear in the number of observations —
-and which threads across cores.
+An evaluation is one call, `search_parallelism` at a time;
+the fit is a single task that threads across cores
+and whose cost grows superlinearly with the number of observations.
 Pointing both at one queue is supported and cannot deadlock,
 since a round never has both kinds in flight at once;
-the fit then just waits for a slot in a pool sized for the objective.
+the fit then waits for a slot in a pool sized for the objective.
 
 botorch has to be importable in two places:
 on the driver, which imports this module,
-and in the `optimizer_queue` workers' environment, which now runs the fit.
+and in the `optimizer_queue` workers' environment, which runs the fit.
 Workers serving only `objective_queue` need neither botorch nor torch.
 A fit that fails because they cannot import it
-raises on the driver naming the queue —
-the traceback itself is in a worker log under `executor.work_dir`.
+raises on the driver naming the queue;
+the traceback is in a worker log under `executor.work_dir`.
 
-The driver still prints `fitting GP on N points`, `GP fit took Ns`
-and `proposed N points in Ns` every round:
-the durations are measured around the calls on the worker
-and handed back, since a search that slows down round after round
-is the thing worth watching, and only the driver sees all of it.
+The durations in `GP fit took Ns, proposed N points in Ns`
+are measured around the calls on the worker and returned to the driver,
+which is the only place the whole run is visible.
 
 ### Tuning the fit
 
@@ -279,22 +266,19 @@ opt = BayesOptBotorch(
 Each is kept on the optimizer and passed to every fit task,
 so a run is tuned by constructing it
 and nothing has to be redeployed to the compute nodes.
-The worker never reads these for itself —
-it is told what this run asked for.
+The worker never reads these for itself.
 
-The timeout deserves a word.
-Proposal cost grows with the number of observations,
-so an unbounded search can spend longer choosing the next batch
-than the batch takes to evaluate.
+On the timeout:
+proposal cost grows with the number of observations,
+so an unbounded search can spend longer choosing a batch
+than evaluating one.
 Hitting the limit is not an error:
 `optimize_acqf` returns the best candidates it has so far
-— still a full batch, still finite and inside the bounds —
+— a full batch, finite and inside the bounds,
 just less thoroughly optimized.
-A slightly worse proposal costs one round; a stalled driver costs the run.
-Raise it when an evaluation is expensive enough
-that a better batch is worth minutes of thinking.
+Raise it when one evaluation is expensive enough
+that a better batch is worth the extra minutes.
 
 [`examples/example_optimize_himmelblau.py`](../examples/example_optimize_himmelblau.py)
-runs the whole thing on a cluster,
+runs this on a cluster,
 with an `eval` pool for the objective and a one-worker `opt` pool for the fit.
-It gains a batch chosen jointly and pays for it with a barrier per round.

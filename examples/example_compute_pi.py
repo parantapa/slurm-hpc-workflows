@@ -101,11 +101,10 @@ def main():
     # so it is bound to an interface they can route to:
     # `ib0`, the login node's InfiniBand interface.
     # A login node without `ib0` raises here,
-    # rather than starting a server the workers would never reach.
+    # rather than starting a server the workers cannot reach.
     with DsServiceServer(interface="ib0", ds_service_bin=DS_SERVICE_BIN) as ds_service:
-        # This matters: the server may take a moment to start.
-        # A client that connects too early might not be able to connect
-        # and will exit with error.
+        # The server may take a moment to start,
+        # and a client that connects too early exits with an error.
         ds_service.wait_until_ready()
 
         # `ib0`'s address, and the port the server picked.

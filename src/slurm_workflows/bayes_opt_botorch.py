@@ -118,10 +118,9 @@ ObjectiveFunction = Callable[..., ObjectiveOutput]
 def _format_param(value: Any) -> str:
     """Render one value for a progress line.
 
-    Floats get a fixed precision
-    so the columns do not jump around between rounds;
-    everything else prints as itself,
-    since an objective's result may carry values of any type.
+    Floats get a fixed precision so columns stay aligned across rounds.
+    Everything else prints as itself:
+    an objective's result may carry values of any type.
     """
     return f"{value:.6g}" if isinstance(value, float) else str(value)
 
@@ -181,10 +180,9 @@ def fit_and_propose(
 
     started = time.monotonic()
 
-    # `batch` points jointly, not `batch` independent optima:
-    # the batch acquisition keeps the parallel proposals
-    # from stacking on one spot.
-    # Optimized jointly rather than greedily one at a time.
+    # The whole batch in one call, optimized jointly rather than greedily:
+    # joint optimization keeps the parallel proposals from stacking
+    # on one spot, and `sequential=True` measured far slower here.
     candidates, _ = optimize_acqf(
         acqf,
         bounds=bounds,
@@ -209,9 +207,9 @@ class BayesOptBotorch:
     Integer and categorical parameters are handled
     by rounding a continuous proposal,
     so distinct proposals can collapse onto the same point.
-    The GP's learned noise term absorbs the resulting repeated observations;
-    on a mostly-discrete space with few levels,
-    expect the search to re-evaluate points it has already seen.
+    The GP's learned noise term absorbs the repeated observations;
+    on a mostly-discrete space with few levels
+    the search re-evaluates points it has already seen.
     """
 
     def __init__(
@@ -263,40 +261,37 @@ class BayesOptBotorch:
             Omit it to draw one from os.urandom.
 
         Everything up to and including the seed is positional-only,
-        which is what leaves those names free for the objective:
-        an objective that takes its own `seed` or `name`
-        still receives it through extra_objective_kwargs.
+        so those names stay free for the objective:
+        an objective taking its own `seed` or `name`
+        receives it through extra_objective_kwargs.
         Everything after is keyword-only.
 
         The search runs between min_search_iterations
         and max_search_iterations rounds,
-        stopping early when it stops paying:
+        stopping early when it stops improving:
 
-        min_search_iterations: rounds always run,
-            whatever they achieve.
-            Stalled rounds below it still count towards patience,
-            they just cannot be the round that ends the search,
+        min_search_iterations: rounds that always run.
+            Stalled rounds below it count towards patience
+            but cannot be the round that ends the search,
             so a search that never improves runs exactly this many rounds
-            and the earliest possible stop is max(min_search_iterations, patience).
-        max_search_iterations: hard ceiling;
-            the search stops here even if it is still improving.
+            and the earliest stop is max(min_search_iterations, patience).
+        max_search_iterations: hard ceiling,
+            reached even if the search is still improving.
         patience: consecutive stalled rounds that end the search.
             A round that improves resets the count,
-            so this bounds a run of bad rounds, not their total.
+            so this bounds a run of stalled rounds, not their total.
         min_improvement: fractional improvement in the best value
-            that a round must deliver to count as improving.
-            0.05 asks each round to beat the incumbent by 5%,
-            measured relative to its magnitude.
+            that a round must deliver to count as improving,
+            measured relative to the magnitude of the incumbent.
+            0.05 requires each round to beat it by 5%.
 
         objective_key: the key in the objective's result
             holding the value to minimize.
-            Worth changing when the objective is shared with something else
-            --- an evaluation that already reports "loss" or "rmse"
-            can be searched as it is,
-            rather than wrapped to rename one of its keys.
-            Every other key is recorded and not modelled, as usual.
+            Set it when the objective already reports under another name,
+            such as "loss" or "rmse".
+            Every other key is recorded and not modelled.
 
-        The rest tune the fit and the acquisition optimization.
+        The rest tune the fit and the acquisition optimization:
 
         num_restarts: multi-start count for `optimize_acqf`.
             The acquisition surface is multimodal,
@@ -310,19 +305,16 @@ class BayesOptBotorch:
             than the same number of independent normal samples.
         acqf_timeout_s: wall-clock budget for one `optimize_acqf` call.
             Proposal cost grows with the number of observations,
-            so an unbounded search can end up spending longer
-            choosing the next batch
-            than the batch takes to evaluate.
+            so an unbounded search can spend longer choosing a batch
+            than evaluating one.
             Hitting the limit is not an error:
-            `optimize_acqf` returns the best candidates it has found so far
-            --- still a full batch, still finite and inside the bounds ---
+            `optimize_acqf` returns the best candidates found so far
+            --- a full batch, finite and inside the bounds,
             just less thoroughly optimized.
-            A slightly worse proposal costs one round;
-            a stalled driver costs the run.
 
         extra_objective_kwargs: extra keyword arguments to pass to objective function.
-            These are forwarded verbatim,
-            so a misspelled early-stopping argument lands here
+            Forwarded verbatim:
+            a misspelled keyword-only argument lands here
             and fails when the objective rejects it.
         """
 
@@ -398,10 +390,10 @@ class BayesOptBotorch:
         self.seed = seed
 
         # Everything evaluated so far, in submission order.
-        # `unit_points` holds the standardized coordinates of the point
-        # the objective *actually* ran at --
-        # after rounding, not the continuous proposal --
-        # so the model is never told about a location that was never evaluated.
+        # `unit_points` holds the standardized coordinates
+        # of the point the objective actually ran at,
+        # after rounding rather than the continuous proposal,
+        # so the model is never told about a location that was not evaluated.
         self.points: list[dict[str, Any]] = []
         self.values: list[float] = []
         # The objective's whole result, not just the number modelled from it.
@@ -521,9 +513,9 @@ class BayesOptBotorch:
                 f"--- {task.output}"
             )
 
-        # Every key this reads below, not just the candidates:
-        # a worker one version behind is exactly what this message is for,
-        # and it would otherwise reach the timings as a bare KeyError.
+        # Check every key read below, not just the candidates:
+        # a version-skewed worker would otherwise reach the timings
+        # as a bare KeyError, skipping this message.
         result = task.output
         expected = (CANDIDATES_KEY, FIT_SECONDS_KEY, PROPOSE_SECONDS_KEY)
         if isinstance(result, Mapping):
@@ -541,9 +533,8 @@ class BayesOptBotorch:
 
         candidates = result[CANDIDATES_KEY]
 
-        # Every round is the full width of the pool.
-        # A short batch would quietly narrow the round instead,
-        # which is a worse way to find out the far end disagrees.
+        # Every round is the full width of the pool;
+        # a short batch would silently narrow it.
         if len(candidates) != batch:
             raise RuntimeError(
                 f"{self.name}: the optimizer queue proposed "
@@ -575,13 +566,13 @@ class BayesOptBotorch:
         Every round is the full width of the pool,
         so a round always costs search_parallelism evaluations.
 
-        Rounds run until either the search stops paying
-        --- `patience` consecutive rounds that fail to improve the best value
-        by `min_improvement` --- or `max_search_iterations` is reached.
+        Rounds run until `patience` consecutive rounds fail to improve
+        the best value by `min_improvement`,
+        or `max_search_iterations` is reached.
         Stalled rounds are counted from the first round,
-        including the ones below `min_search_iterations`:
-        the floor holds off the *stop*, not the counting,
-        so the earliest possible stop is max(`min_search_iterations`, `patience`).
+        including those below `min_search_iterations`:
+        the floor holds off the stop, not the counting,
+        so the earliest stop is max(`min_search_iterations`, `patience`).
         """
         if not self.values:
             raise RuntimeError(
@@ -606,15 +597,12 @@ class BayesOptBotorch:
 
             stalled += 1
 
-            # Two things hold the search open,
-            # and a stalled round ends it only once both have given way:
-            # the streak has to reach `patience`,
-            # and the round count has to reach the floor.
-            # Reporting the larger of the two gaps
-            # is what keeps the progress line honest
-            # when the floor outlasts the streak
-            # --- a bare `stalled`/`patience` ratio runs past its own
-            # denominator, and says the search should have stopped rounds ago.
+            # A stalled round ends the search only when both bounds are met:
+            # the streak reaches `patience`
+            # and the round count reaches the floor.
+            # Report the larger gap:
+            # `stalled`/`patience` alone runs past its own denominator
+            # when the floor outlasts the streak.
             remaining = max(
                 self.patience - stalled,
                 self.min_search_iterations - iteration,
@@ -645,11 +633,10 @@ class BayesOptBotorch:
         so it means the same thing
         whether the objective is scaled in seconds or in nanoseconds.
 
-        A negative incumbent works the same way
-        --- going from -10 to -11 is a 10% improvement ---
-        but an incumbent of exactly zero
-        has no magnitude to take a fraction of,
-        so there any strict decrease counts.
+        A negative incumbent works the same way:
+        -10 to -11 is a 10% improvement.
+        An incumbent of exactly zero has no magnitude
+        to take a fraction of, so any strict decrease counts.
         """
         if current >= previous:
             return False
@@ -663,17 +650,13 @@ class BayesOptBotorch:
     def _report_best(self) -> None:
         """Print the best point measured so far.
 
-        Printed after every batch comes back
-        so a long search shows whether it is still improving,
-        which is the thing you actually want to watch:
+        Printed after every batch:
         several rounds with an unchanged best
-        say the budget is being spent without buying anything.
+        mean the budget is being spent without improving anything.
         """
         best = self._best_index()
         params = _format_mapping(self.points[best])
-        # The whole result, not just the objective value:
-        # whatever else the evaluation reported is usually the thing
-        # that explains *why* this point is winning.
+        # The whole result, not just the objective value.
         output = _format_mapping(self.outputs[best])
         print(
             f"{self.name}: best after {len(self.values)} points "

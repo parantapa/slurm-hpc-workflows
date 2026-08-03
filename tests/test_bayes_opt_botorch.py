@@ -6,35 +6,33 @@ so most tests here drive that contract through `LocalExecutor`,
 which runs whatever it is handed inline ---
 both the objective and, since the fit became a task of its own,
 `fit_and_propose`.
-Fitting a GP and optimizing an acquisition function
-is the expensive part of every one of these tests;
-paying for a queue round trip on top would buy nothing,
-because the optimizer cannot tell the difference.
+The GP fit and the acquisition optimization
+are the expensive part of these tests;
+a queue round trip on top would add nothing the optimizer can tell apart.
 
-Running the fit inline is also what keeps the monkeypatching here honest:
+Running the fit inline is also what makes the monkeypatching work:
 a patched `bo.optimize_acqf` reaches the task
 because the task ran in this process.
 `TestOptimizerQueue` covers what only shows up once it does not:
 which queue the fit went to,
-and what a failure on the far end says.
+and what a failure on the far end reports.
 
-`TestRealExecutor` is what keeps the stand-in honest:
-it runs a whole optimization through the real executor,
-the real ds-service queue and a real worker
---- the fit included, on the same queue ---
-so the two-call contract is pinned against the thing it stands in for.
+`TestRealExecutor` keeps the stand-in honest.
+It runs a whole optimization through the real executor,
+the real ds-service queue and a real worker, the fit included,
+pinning the two-call contract against the real implementation.
 
-The four tests in `TestSearchBehaviour` assert *behaviour of the search*,
-not just its bookkeeping.
-They are the ones that would catch the sign of the objective being flipped
+The four tests in `TestSearchBehaviour` assert behaviour of the search
+rather than its bookkeeping,
+and are what would catch the objective's sign being flipped
 --- botorch maximizes and this optimizer minimizes.
 They are stochastic
 (torch's global RNG is left unseeded, so each run is a fresh sample),
 and their thresholds come from measured spreads:
 the monotone case put every search point below 0.1 against a threshold of 0.5,
 and `test_search_beats_random_search` won 12/12 with a 4.6x margin.
-All four use unimodal objectives on purpose
---- an earlier multimodal version of the random-search comparison
+All four use unimodal objectives:
+an earlier multimodal version of the random-search comparison
 lost 1 run in 10.
 """
 
@@ -428,11 +426,10 @@ class TestConstruction:
         assert opt.acqf_timeout_s > 0.0
 
     def test_an_objective_may_take_the_optimizers_own_argument_names(self):
-        """The leading arguments are positional-only, which is the point of it.
+        """The leading arguments are positional-only, which is what this buys.
 
-        An objective with its own `seed` is ordinary,
-        and it must reach the objective rather than silently
-        rebinding the exploration design's seed.
+        An objective with its own `seed` must receive it,
+        rather than rebinding the exploration design's seed.
         """
 
         def objective(x, y, *, seed):
@@ -695,10 +692,8 @@ class TestEarlyStopping:
     def test_stalls_below_the_floor_are_carried_past_it(self):
         """The floor holds off the stop, not the counting.
 
-        Five rounds' worth of patience is already spent
-        by the time the floor is behind us,
-        so the search ends the moment it may
-        --- at the floor, not at floor + patience.
+        Patience is already spent by the time the floor is reached,
+        so the search ends at the floor rather than at floor + patience.
         """
         opt, _ = make_opt(
             objective=constant,
@@ -785,8 +780,8 @@ class TestEarlyStopping:
 
         out = capsys.readouterr().out
 
-        # The gap shrinks by one a round, and the floor is what sets it
-        # --- patience alone would have run out after three.
+        # The gap shrinks by one a round, and the floor sets it:
+        # patience alone would have run out after three.
         assert re.findall(r"(\d+) in a row, (\d+) more to stop", out) == [
             ("1", "4"),
             ("2", "3"),
@@ -1219,7 +1214,7 @@ class TestOptimizerQueue:
         assert "search 1/1" in str(excinfo.value)
 
     def test_an_unusable_result_is_reported_rather_than_unpacked(self, monkeypatch):
-        """A worker running a different slurm-workflows is the way here."""
+        """The case is a worker running a different slurm-workflows."""
         monkeypatch.setattr(bo, "fit_and_propose", lambda *a, **kw: {"points": []})
 
         opt, _ = make_opt(explore=4, iterations=1, parallel=2)
@@ -1286,25 +1281,23 @@ class TestOptimizerQueue:
 
 
 class TestSearchBehaviour:
-    """The optimizer minimizes. Botorch maximizes, so this is worth asserting."""
+    """The optimizer minimizes while botorch maximizes, so assert the sign."""
 
     def test_search_moves_toward_the_minimum(self):
         # f(x) = x on [0, 1]: a flipped sign sends the search to 1.0 instead.
         #
-        # Asserted on the *median* search point. Two things this must not be:
+        # Asserted on the *median* search point, not these two:
         #
-        # `max(searched)` was the old assertion and no longer holds.
-        # qLogNEI treats the objective as noisy, so it keeps probing away
-        # from the incumbent instead of collapsing onto it;
-        # measured over 15 correct runs
-        # the max reached 1.0, breaching a 0.5 bound 10 times.
-        # That is exploration, not a wrong sign.
+        # `max(searched)`: qLogNEI treats the objective as noisy and keeps
+        # probing away from the incumbent, so over 15 correct runs the max
+        # reached 1.0 and breached a 0.5 bound 10 times. That is exploration,
+        # not a wrong sign.
         #
-        # `best_point()` cannot do the job either: with the sign deliberately
-        # flipped the best stays at 0.057, because the Sobol' exploration
-        # already sampled near the minimum and the search never beats it.
+        # `best_point()`: with the sign flipped the best stays at 0.057,
+        # because the Sobol' exploration already sampled near the minimum
+        # and the search never beats it.
         #
-        # The median separates the two cleanly. Measured over 12 runs each:
+        # The median separates the two. Measured over 12 runs each:
         # correct 0.00 (max 0.00), flipped 1.00 (min 0.97).
         opt, _ = make_opt(
             objective=identity,
@@ -1578,10 +1571,9 @@ class TestBestPoint:
 class TestRealExecutor:
     """One end-to-end run against the real queue, executor and worker.
 
-    This is what keeps `LocalExecutor` honest
-    --- everything above assumes `submit()` returns a Task
-    whose `output` `wait()` fills in,
-    and this is where that assumption meets the real implementation.
+    Everything above assumes `submit()` returns a Task
+    whose `output` `wait()` fills in;
+    this is where that assumption meets the real implementation.
     """
 
     @pytest.fixture(autouse=True)
