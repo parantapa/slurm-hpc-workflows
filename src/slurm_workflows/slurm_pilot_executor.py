@@ -81,13 +81,13 @@ class SlurmPilotExecutor:
 
         if work_dir is None:
             now = datetime.now().isoformat()
-            work_dir = platformdirs.user_cache_path(appname=f"slurm-pilot") / now
+            work_dir = platformdirs.user_cache_path(appname=f"slurm-workflows") / now
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger = logging.getLogger("pilot_coordinator")
+        self.logger = logging.getLogger("excutor")
         self.logger.setLevel(LOG_LEVEL)
-        handler = logging.FileHandler(self.work_dir / "coordinator.log", delay=True)
+        handler = logging.FileHandler(self.work_dir / "executor.log", delay=True)
         handler.setLevel(LOG_LEVEL)
         formatter = logging.Formatter(LOG_FORMAT)
         handler.setFormatter(formatter)
