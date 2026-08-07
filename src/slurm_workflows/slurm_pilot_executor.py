@@ -84,6 +84,7 @@ class SlurmPilotExecutor:
             work_dir = platformdirs.user_cache_path(appname=f"slurm-workflows") / now
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        print(f"work directory: '{self.work_dir}'")
 
         self.logger = logging.getLogger("excutor")
         self.logger.setLevel(LOG_LEVEL)
