@@ -294,7 +294,9 @@ class TestScaleWorkers:
         with pytest.raises(RuntimeError, match="Failed to cancel slurm jobs"):
             defined.scale_workers("cpu", 0)
 
-    def test_batch_worker_uses_srun_or_not(self, executor, fake_slurm, setup_script):
+    def test_batch_worker_uses_srun_or_not(
+        self, executor, fake_slurm, setup_script, srun_lines
+    ):
         executor.define_worker(
             name="batch",
             sbatch_args=[],
@@ -307,34 +309,30 @@ class TestScaleWorkers:
         executor.scale_workers("fanout", 1)
 
         batch_script, fanout_script = fake_slurm.submissions
-        # Compare command lines, not raw text: tmp_path names can contain "srun".
-        batch_cmds = [
-            ln for ln in batch_script.script_text.splitlines() if ln.startswith("srun")
-        ]
-        fanout_cmds = [
-            ln for ln in fanout_script.script_text.splitlines() if ln.startswith("srun")
-        ]
+        batch_cmds = srun_lines(batch_script.script_text)
+        fanout_cmds = srun_lines(fanout_script.script_text)
         assert batch_cmds == []
-        assert len(fanout_cmds) == 1
-        assert fanout_cmds[0].endswith(".sh'")
-        # Fanned-out tasks each need their own output file,
-        # or they all write into the batch job's single one.
-        assert "--output" in fanout_cmds[0]
+        # Two, because the choice is the job's to make when it starts:
+        # a one-task job writes to the batch file,
+        # anything larger takes a file per task
+        # instead of interleaving them all into that one.
+        assert len(fanout_cmds) == 2
+        assert all(cmd.endswith(".sh'") for cmd in fanout_cmds)
+        assert "--output" not in fanout_cmds[0]
+        assert "--output" in fanout_cmds[1]
 
     def test_srun_output_files_are_per_task_and_in_the_work_dir(
-        self, executor, fake_slurm, setup_script
+        self, executor, fake_slurm, setup_script, srun_lines
     ):
         executor.define_worker(name="fanout", sbatch_args=[], setup_script=setup_script)
 
         executor.scale_workers("fanout", 1)
 
         (submission,) = fake_slurm.submissions
-        srun_line = next(
-            ln for ln in submission.script_text.splitlines() if ln.startswith("srun")
-        )
+        _, per_task = srun_lines(submission.script_text)
         assert (
             f"--output '{executor.work_dir}/slurm_pilot_worker.fanout.0-%j-%t.out'"
-            in srun_line
+            in per_task
         )
 
 

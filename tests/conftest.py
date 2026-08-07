@@ -76,6 +76,31 @@ def _hang_guard():
 
 
 # --------------------------------------------------------------------------
+# Script inspection
+# --------------------------------------------------------------------------
+
+
+def _srun_lines(script: str) -> list[str]:
+    """The `srun` command lines in a generated script, in the order rendered.
+
+    Stripped before matching,
+    because the non-batch worker script indents its `srun` calls
+    inside the shell `if` that chooses between them.
+    Matched line by line rather than searched for in the whole text,
+    since a path baked into the script can itself contain "srun".
+    """
+
+    return [ln.strip() for ln in script.splitlines() if ln.strip().startswith("srun")]
+
+
+@pytest.fixture
+def srun_lines():
+    """Pull the `srun` command lines out of a generated script."""
+
+    return _srun_lines
+
+
+# --------------------------------------------------------------------------
 # ds-service (real)
 # --------------------------------------------------------------------------
 

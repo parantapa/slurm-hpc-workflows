@@ -166,6 +166,19 @@ documenting each template's required kwargs
 - `is_batch_worker=False` wraps the worker script in `srun`
   and passes `--output <work_dir>/<name>-%j-%t.out`.
   That is why the `worker_sbatch_script` template takes `name` and `work_dir`.
+  **The `--output` is dropped for a job of exactly one task**,
+  which then writes to the batch job's own output file
+  instead of a per-task file duplicating it.
+  The job decides at run time, in the shell:
+  `SLURM_NTASKS` is the number of tasks in the job
+  whenever `--ntasks` or any `--ntasks-per-*` option was given,
+  so it settles the question alone and nothing may override it.
+  It is unset only when no task count was asked for,
+  and that is exactly when one task per node is the default,
+  so `SLURM_JOB_NUM_NODES` stands in there.
+  The count is per *job*, not per node
+  — `--nodes=4 --ntasks-per-node=1` is four tasks
+  and keeps its per-task files.
 - **The worker process must not redirect `sys.stdout` / `sys.stderr`.**
   Slurm writes those files itself via `--output`,
   and `logging.basicConfig` leaves the streams on the inherited handles.

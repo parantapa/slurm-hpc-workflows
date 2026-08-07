@@ -206,7 +206,7 @@ Everything for a run lives under the executor's `work_dir`
 | `coordinator.log` | Worker submission and cancellation from the executor's side |
 | `<worker-name>.sh`, `<worker-name>.sbatch` | The generated scripts — read these first when a job dies immediately |
 | `<worker-name>-<jobid>-<task>.out` | One per worker process: setup-script trace, task-by-task progress, full tracebacks |
-| `<worker-name>-<jobid>.out` | The batch job's own output |
+| `<worker-name>-<jobid>.out` | The batch job's own output — and the worker's log too, when the job is a single task |
 
 Slurm writes those files; the worker process doesn't redirect its own output.
 Which of the two you want depends on how the group was defined:
@@ -220,6 +220,21 @@ Which of the two you want depends on how the group was defined:
     `<worker-name>-<jobid>.out` then holds
     only what the batch script itself emitted,
     which in practice means `srun`'s own errors.
+
+    The exception is a job of exactly one task
+    — `--ntasks=1`, or `--nodes=1` with nothing else said about tasks.
+    One task has nothing to interleave with,
+    so it keeps `srun` but drops the `--output`
+    and writes to `<worker-name>-<jobid>.out` like a batch worker,
+    rather than leaving you two files to open per worker.
+    Note this counts tasks in the *job*, not per node:
+    `--nodes=4 --ntasks-per-node=1` is four tasks
+    and still gets four per-task files.
+
+    Which way a job went is not something you have to reconstruct:
+    the batch file opens with the task count the job decided on
+    (`Num tasks: 4`), says so when it redirects,
+    and traces the `srun` command it ran.
 - **`is_batch_worker=True`** runs one worker directly on the batch node,
     with no `srun` and so no per-task file.
     Everything lands in `<worker-name>-<jobid>.out`.

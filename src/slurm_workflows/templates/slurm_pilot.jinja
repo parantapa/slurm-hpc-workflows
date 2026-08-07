@@ -1,9 +1,23 @@
 {#- name: "worker_sbatch_script" -#}
 
 {% if is_batch_worker %}
+echo "Running batch worker."
+
 . '{{ worker_script_path }}'
 {% else %}
-srun --output '{{ work_dir }}/{{ name }}-%j-%t.out' /bin/bash '{{ worker_script_path }}'
+# In case more than 1 tasks are generated per slurm job
+# we redirect output of each task to seprate file.
+num_tasks="${SLURM_NTASKS:-${SLURM_JOB_NUM_NODES:-}}"
+echo "Num tasks: ${num_tasks}"
+if [[ "${num_tasks}" = "1" ]] ; then
+    set -x
+    srun /bin/bash '{{ worker_script_path }}'
+else
+    echo "Redirecting output."
+
+    set -x
+    srun --output '{{ work_dir }}/{{ name }}-%j-%t.out' /bin/bash '{{ worker_script_path }}'
+fi
 {% endif %}
 
 {#- name: "worker_script" -#}
