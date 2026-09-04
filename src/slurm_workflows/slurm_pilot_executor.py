@@ -81,18 +81,28 @@ class SlurmPilotExecutor:
 
         if work_dir is None:
             now = datetime.now().isoformat()
-            work_dir = platformdirs.user_cache_path(appname=f"slurm-workflows") / now
+            work_dir = platformdirs.user_cache_path(appname="slurm-workflows") / now
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         print(f"work directory: '{self.work_dir}'")
 
-        self.logger = logging.getLogger("excutor")
+        # A logger of this executor's own, keyed on its id.
+        # A name shared between executors would collect one handler per
+        # executor, and every line would then be written to every work dir
+        # that had ever been opened in this process.
+        self.logger = logging.getLogger(f"slurm_workflows.executor.{self.executor_id}")
         self.logger.setLevel(LOG_LEVEL)
+        # These records belong in the work dir, not in whatever handler the
+        # importing program happens to have put on the root logger.
+        self.logger.propagate = False
         handler = logging.FileHandler(self.work_dir / "executor.log", delay=True)
         handler.setLevel(LOG_LEVEL)
         formatter = logging.Formatter(LOG_FORMAT)
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
+        # Detached and closed by `close()`;
+        # until then the handler holds the log file open.
+        self._log_handler: logging.FileHandler | None = handler
 
         self.groups: dict[str, WorkerGroup] = {}
 
@@ -234,7 +244,15 @@ class SlurmPilotExecutor:
         *args,
         **kwargs,
     ) -> Task:
-        priority = time.perf_counter()
+        # ds-service dispatches the highest priority first,
+        # so the timestamp is negated to keep submission order:
+        # a task submitted earlier outranks one submitted later.
+        #
+        # Wall clock rather than a monotonic counter, whose zero is the
+        # start of *this* process: two executors sharing a queue would
+        # otherwise be ordered by which of them started more recently
+        # rather than by when each task was submitted.
+        priority = -time.time()
         function_bytes = cloudpickle.dumps(fn, protocol=pickle.HIGHEST_PROTOCOL)
         input_bytes = cloudpickle.dumps(
             (args, kwargs), protocol=pickle.HIGHEST_PROTOCOL
@@ -297,7 +315,7 @@ class SlurmPilotExecutor:
             # Status for every pending task comes back in a single request,
             # in the same order as the ids we sent.
             states = self.client.task_get_status([t.task_id for t in pending])
-            states = cast(list[Task], states)
+            states = cast(list[TaskState], states)
 
             next_pending: list[Task] = []
             completed = 0
@@ -307,6 +325,15 @@ class SlurmPilotExecutor:
                     task.output = cloudpickle.loads(output)
                     completed += 1
                     yield task
+                elif state == TaskState.Canceled:
+                    # Nothing here cancels tasks,
+                    # so this is somebody cancelling out of band.
+                    # A canceled task is never dispatched again,
+                    # so it has to be reported rather than waited on.
+                    raise RuntimeError(
+                        f"Task {task.task_id} was canceled on the task queue "
+                        f"server, so it will never produce an output"
+                    )
                 elif state == TaskState.Undefined:
                     raise RuntimeError(
                         f"Task {task.task_id} is unknown to the task queue server"
@@ -487,12 +514,31 @@ class SlurmPilotExecutor:
         except Exception:
             self.logger.exception("Failed to cancel slurm jobs")
 
+    def _close_log_handler(self) -> None:
+        """Detach this executor's log handler and close its file.
+
+        The logger holds the handler and the handler holds the file,
+        so neither is released while the logger is in the logging module's
+        registry --- which is for the life of the process.
+        Idempotent, because `close()` is.
+        """
+        handler = self._log_handler
+        if handler is None:
+            return
+
+        # Cleared first, so a failure below cannot leave a detached handler
+        # to be closed a second time.
+        self._log_handler = None
+        self.logger.removeHandler(handler)
+        handler.close()
+
     def close(self):
         self._cleanup_all_workers()
         for group in self.groups.values():
             group.workers.clear()
 
         self.client.close()
+        self._close_log_handler()
 
     def stop(self):
         self._cleanup_all_workers()

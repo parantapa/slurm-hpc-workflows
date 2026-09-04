@@ -66,6 +66,7 @@ TASKS_PER_NODE = 40
 # Passed through to `sbatch` verbatim, so any Slurm option works.
 #   --account            the allocation to charge.
 #   --partition          the partition to use.
+#   --qos                bii-unlimited, which is what the bii partition wants.
 #   --nodes              how many nodes this *one* job holds.
 #   --ntasks-per-node    task slots per node, one worker process per slot.
 #   --cpus-per-task=1    this objective is single-threaded.
@@ -74,7 +75,7 @@ TASKS_PER_NODE = 40
 #                        so make it longer than the work will take.
 SBATCH_ARGS = [
     "--account=bii_nssac",
-    f"--partition=bii --nodes={NUM_NODES}",
+    f"--partition=bii --qos=bii-unlimited --nodes={NUM_NODES}",
     f"--ntasks-per-node={TASKS_PER_NODE} --cpus-per-task=1 --mem=0",
     "--time=1:00:00",
 ]

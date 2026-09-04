@@ -10,7 +10,7 @@ from pathlib import Path
 import jinja2
 import pytest
 
-from slurm_workflows.templates import render_template
+from slurm_workflows.templates import line_col_from_pos, parse_file, render_template
 
 
 def run_sbatch_script(
@@ -51,6 +51,131 @@ def run_sbatch_script(
         env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", **env},
     )
     return proc
+
+
+class TestParseFile:
+    """The multi-template-per-file format itself.
+
+    A file is a run of `{#- <json5 header> -#}` markers,
+    each followed by the body of the template it names.
+    Nothing else in the file is addressable,
+    which is what the cases below pin down.
+    """
+
+    def write(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / "sample.jinja"
+        path.write_text(text)
+        return path
+
+    def test_reads_every_template_in_the_file(self, tmp_path: Path):
+        path = self.write(
+            tmp_path,
+            '{#- name: "first" -#}\nbody one\n{#- name: "second" -#}\nbody two\n',
+        )
+
+        templates = parse_file("sample", path)
+
+        assert sorted(templates) == ["sample:first", "sample:second"]
+        assert templates["sample:first"].source == "body one"
+        assert templates["sample:second"].source == "body two"
+
+    def test_the_prefix_is_the_callers_not_the_filename(self, tmp_path: Path):
+        """`load_template` derives it from the name being looked up.
+
+        The file it then reads is `<prefix>.jinja`,
+        so the two agree in practice
+        --- but `parse_file` takes the caller's word for it.
+        """
+        path = self.write(tmp_path, '{#- name: "only" -#}\nbody\n')
+
+        assert list(parse_file("other", path)) == ["other:only"]
+        assert list(parse_file("sample", path)) == ["sample:only"]
+
+    def test_a_body_is_stripped(self, tmp_path: Path):
+        path = self.write(tmp_path, '{#- name: "only" -#}\n\n\n  body  \n\n')
+
+        assert parse_file("sample", path)["sample:only"].source == "body"
+
+    def test_text_before_the_first_header_is_ignored(self, tmp_path: Path):
+        path = self.write(tmp_path, 'a preamble\n{#- name: "only" -#}\nbody\n')
+
+        assert parse_file("sample", path)["sample:only"].source == "body"
+
+    def test_a_file_with_no_headers_yields_nothing(self, tmp_path: Path):
+        assert parse_file("sample", self.write(tmp_path, "just text\n")) == {}
+
+    def test_an_empty_file_yields_nothing(self, tmp_path: Path):
+        assert parse_file("sample", self.write(tmp_path, "")) == {}
+
+    def test_a_repeated_name_keeps_the_last(self, tmp_path: Path):
+        """Not an error today. Pinned so a change to that is a deliberate one."""
+        path = self.write(
+            tmp_path,
+            '{#- name: "dup" -#}\nfirst\n{#- name: "dup" -#}\nsecond\n',
+        )
+
+        assert parse_file("sample", path)["sample:dup"].source == "second"
+
+    def test_an_unterminated_header_is_reported(self, tmp_path: Path):
+        path = self.write(tmp_path, '{#- name: "only"\nbody with no header end\n')
+
+        with pytest.raises(ValueError, match="Unable to find end of header"):
+            parse_file("sample", path)
+
+    def test_a_malformed_header_is_reported(self, tmp_path: Path):
+        path = self.write(tmp_path, "{#- name: -#}\nbody\n")
+
+        with pytest.raises(Exception) as excinfo:
+            parse_file("sample", path)
+
+        assert "Failed to parse template file" in "".join(excinfo.value.__notes__)
+
+    def test_a_header_without_a_name_is_reported(self, tmp_path: Path):
+        path = self.write(tmp_path, '{#- title: "only" -#}\nbody\n')
+
+        with pytest.raises(KeyError) as excinfo:
+            parse_file("sample", path)
+
+        assert "Failed to parse template file" in "".join(excinfo.value.__notes__)
+
+    def test_the_error_carries_a_file_position(self, tmp_path: Path):
+        path = self.write(tmp_path, '{#- name: "ok" -#}\nbody\n{#- oops -#}\n')
+
+        with pytest.raises(Exception) as excinfo:
+            parse_file("sample", path)
+
+        notes = "".join(excinfo.value.__notes__)
+        assert str(path) in notes
+
+    def test_a_jinja_comment_in_a_body_is_read_as_the_next_header(self, tmp_path: Path):
+        """A limit of the format, not a bug to be fixed by accident.
+
+        `{#-` is how a template body ends,
+        so a body cannot also contain a whitespace-trimming Jinja comment
+        --- the parser takes it for the header of the next template.
+        Use `{#` without the dash for a comment inside a body.
+        """
+        path = self.write(
+            tmp_path,
+            '{#- name: "only" -#}\nbody\n{#- a note -#}\nmore body\n',
+        )
+
+        with pytest.raises(Exception):
+            parse_file("sample", path)
+
+
+class TestLineColFromPos:
+    def test_the_first_character_is_line_one_column_one(self):
+        assert line_col_from_pos("hello", 0) == (1, 1)
+
+    def test_counts_lines_and_columns(self):
+        text = "one\ntwo\nthree"
+
+        assert line_col_from_pos(text, text.index("two")) == (2, 1)
+        assert line_col_from_pos(text, text.index("three") + 2) == (3, 3)
+
+    def test_an_empty_text_is_the_start(self):
+        assert line_col_from_pos("", 0) == (1, 1)
 
 
 class TestLoader:

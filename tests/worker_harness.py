@@ -26,12 +26,35 @@ class _StoppingClient:
         self._limit = limit
         self.completed = 0
 
-    def task_done(self, task_id: str, output: bytes):
-        result = self._inner.task_done(task_id, output)
+    def task_done(self, task_id: str, worker_id: str, output: bytes):
+        result = self._inner.task_done(task_id, worker_id, output)
         self.completed += 1
         if self.completed >= self._limit:
             raise StopWorker
         return result
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _IdlingClient:
+    """Wraps a real client, raising StopWorker after N `task_get` calls.
+
+    The `task_get` calls themselves are the real ones,
+    so an empty queue answers with the server's own `NoTaskAvailable`
+    rather than one this double invented.
+    """
+
+    def __init__(self, inner: DsServiceClient, limit: int) -> None:
+        self._inner = inner
+        self._limit = limit
+        self.polls = 0
+
+    def task_get(self, worker_id: str, queue: str | list[str]):
+        self.polls += 1
+        if self.polls > self._limit:
+            raise StopWorker
+        return self._inner.task_get(worker_id, queue)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -60,8 +83,9 @@ def run_worker(worker: PilotWorkerProcess, expect_tasks: int) -> None:
     """Run the worker's real main loop until `expect_tasks` are completed.
 
     Tasks must already be queued:
-    an empty queue makes `task_get` block until its deadline,
-    which would just slow the test down.
+    `task_get` on an empty queue raises `NoTaskAvailable` at once,
+    which the worker answers by sleeping and asking again,
+    so a worker started with nothing to do spins until the hang guard fires.
     """
     # `_StoppingClient` forwards everything it does not override,
     # so it satisfies the worker's use of the client without subclassing it.
@@ -70,3 +94,21 @@ def run_worker(worker: PilotWorkerProcess, expect_tasks: int) -> None:
         worker.main()
     except StopWorker:
         pass
+
+
+def poll_worker(worker: PilotWorkerProcess, polls: int) -> int:
+    """Run the worker's real main loop for `polls` fetches, and count them.
+
+    For the empty-queue case, where no task is ever completed
+    and `run_worker` would therefore never stop.
+    Returns the number of fetches the worker actually made,
+    so a loop that gave up early is distinguishable
+    from one that kept polling.
+    """
+    client = _IdlingClient(worker.client, polls)
+    worker.client = cast(DsServiceClient, client)
+    try:
+        worker.main()
+    except StopWorker:
+        pass
+    return client.polls - 1

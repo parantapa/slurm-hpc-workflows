@@ -13,7 +13,7 @@ from typing import Any
 
 import click
 import cloudpickle
-from ds_service_client import DsServiceClient
+from ds_service_client import DsServiceClient, NoTaskAvailable
 
 from .utils import gen_error_id, RemoteExecutionError, LOG_FORMAT, LOG_LEVEL
 
@@ -64,7 +64,16 @@ class PilotWorkerProcess:
 
         while True:
             try:
-                task = self.client.task_get(self.worker_id, self.group)
+                try:
+                    task = self.client.task_get(self.worker_id, self.group)
+                except NoTaskAvailable:
+                    # Nothing on the queue right now, which is the normal
+                    # idle case; sleep and ask again.
+                    # A TimeoutError here means an unreachable server instead,
+                    # and is deliberately left to the handler below.
+                    time.sleep(NEXT_TASK_RETRY_TIME_S)
+                    continue
+
                 try:
                     self.logger.info(
                         "task_id=%s: Deserializing function and inputs ...",
@@ -81,7 +90,7 @@ class PilotWorkerProcess:
                     self.logger.info("task_id=%s: Serializng output ...", task.task_id)
                     output = cloudpickle.dumps(retval, protocol=pickle.HIGHEST_PROTOCOL)
 
-                    self.client.task_done(task.task_id, output)
+                    self.client.task_done(task.task_id, self.worker_id, output)
                 except Exception as e:
                     eid = gen_error_id()
                     self.logger.exception(
@@ -90,11 +99,16 @@ class PilotWorkerProcess:
 
                     retval = RemoteExecutionError(error=str(e), error_id=eid)
                     output = cloudpickle.dumps(retval, protocol=pickle.HIGHEST_PROTOCOL)
-                    self.client.task_done(task.task_id, output)
-            except TimeoutError:
-                time.sleep(NEXT_TASK_RETRY_TIME_S)
+                    self.client.task_done(task.task_id, self.worker_id, output)
             except Exception:
                 self.logger.exception("Unexpected exception")
+
+                # An unreachable server is the likely cause,
+                # and it answers straight away rather than at the deadline
+                # -- a refused connection is a TimeoutError in no time at all.
+                # Without this the loop would spin on a core
+                # and fill the job's output file with the same traceback.
+                time.sleep(NEXT_TASK_RETRY_TIME_S)
 
 
 @click.command()

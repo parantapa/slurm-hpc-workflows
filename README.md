@@ -12,16 +12,12 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
 
 - **Pilot-job task execution** — pay the queue wait once,
     then dispatch tasks at queue-latency speed.
-- **Dynamic scaling** — grow or shrink a pool of workers at runtime
-    with `scale_workers`.
+- **Dynamic scaling** — grow or shrink a pool of workers at runtime.
 - **Stateful actors** — keep expensive per-worker state
     (loaded models, DB connections) warm across many tasks.
 - **Transparent serialization** — functions, arguments, and return values
-    are [cloudpickled](https://github.com/cloudpipe/cloudpickle),
-    so closures and lambdas work.
-- **Non-fatal remote errors** — an exception on a worker
-    doesn't kill the driver script; it comes back as the task's result.
-- **Batch Bayesian optimization** — a [botorch](https://botorch.org/) optimizer
+    are transferred using [cloudpickle](https://github.com/cloudpipe/cloudpickle).
+- **Batch Bayesian optimization** — a [botorch](https://botorch.org/) based optimizer
     that proposes a whole batch of points at once
     and evaluates them across the worker pool,
     over mixed integer / float / log-float / categorical spaces.
@@ -30,10 +26,7 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
 
 - Python >= 3.12
 - Access to a Slurm cluster (`sbatch`, `squeue`, `scancel` on `PATH`)
-- A running [`ds-service`](https://github.com/parantapa/ds-service) server,
-  reachable from the login node *and* the compute nodes.
-  The client library is installed as a dependency;
-  the server is a separate install.
+- A running [`ds-service`](https://github.com/parantapa/ds-service) server.
 
 ## Installation
 
@@ -43,15 +36,13 @@ pip install -U slurm-workflows
 
 ## Documentation
 
-- **[How to use slurm-workflows](docs/howto-use-slurm-workflows.md)** — the user
-  guide: concepts, quick start, stateful actors, one worker per job vs per task,
-  running the task-queue server, and troubleshooting.
-- **[API reference](docs/api-reference.md)** — `SlurmPilotExecutor`, `Task`,
-  `check_for_error`, and the worker environment.
-- **[Batch Bayesian optimization with botorch](docs/bayesian-optimization-using-botorch.md)**
-  — the batch Bayesian optimizer that proposes a whole batch of points per round.
-- **[How to run the tests](docs/howto-run-tests.md)** — running the suite, what
-  is mocked and what is real, and notes for changing the tests.
+| Document | What it covers |
+| --- | --- |
+| [How to use slurm-workflows](docs/howto-use-slurm-workflows.md) | The user guide: concepts, quick start, stateful actors, one worker per job vs per task, running the task-queue server, and troubleshooting. |
+| [Developer notes](docs/developer-notes.md) | Working on `slurm-workflows` itself: where the code lives, the invariants that are quiet when broken, and the conventions a change is checked against. |
+| [Batch Bayesian optimization with botorch](docs/bayesian-optimization-using-botorch.md) | The batch Bayesian optimizer that proposes a whole batch of points per round, over mixed integer / float / log-float / categorical spaces. |
+| [API reference](docs/api-reference.md) | `SlurmPilotExecutor`, `Task`, `check_for_error`, and the worker environment. |
+| [How to run the tests](docs/howto-run-tests.md) | Running the suite, what is mocked and what is real, and notes for changing the tests. |
 
 ## License
 

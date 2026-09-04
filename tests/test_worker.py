@@ -20,7 +20,7 @@ import support_actor
 from slurm_workflows import slurm_pilot_worker as worker_mod
 from slurm_workflows.slurm_pilot_worker import slurm_pilot_worker
 from slurm_workflows.utils import RemoteExecutionError
-from worker_harness import make_worker, run_worker
+from worker_harness import make_worker, poll_worker, run_worker
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +54,26 @@ class TestTaskExecution:
 
         executor.wait([task])
         assert task.output == 49
+
+    def test_idles_quietly_on_an_empty_queue(
+        self, ds_service_address, tmp_path, caplog
+    ):
+        """An empty queue is the normal idle case, not an error.
+
+        `task_get` answers `NoTaskAvailable` at once when nothing is ready,
+        and the worker sleeps and asks again.
+        Left to the catch-all handler instead,
+        the loop would still poll, but log a traceback every time round,
+        so the absence of that log is what tells the two apart.
+        """
+        worker = make_worker(ds_service_address, tmp_path)
+
+        with caplog.at_level(logging.ERROR, logger="worker_process"):
+            polls = poll_worker(worker, polls=3)
+
+        worker.close()
+        assert polls == 3, "the worker stopped polling an empty queue"
+        assert "Unexpected exception" not in caplog.text
 
     def test_runs_many_tasks_in_sequence(self, executor, ds_service_address, tmp_path):
         tasks = [executor.submit("cpu", square, i) for i in range(5)]
@@ -282,6 +302,23 @@ class TestWorkerIdentity:
 class TestCli:
     """The console entry point: env vars, sys.path, and leaving output alone."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_process_state(self):
+        """Put `os.environ` and `sys.path` back after each case.
+
+        The command writes both directly and undoes neither
+        --- it is a process entry point, and the process is the worker ---
+        so without this a run leaks `DS_SERVER_ADDRESS` into every later
+        test, which is exactly the value `DsServiceClient()` falls back to
+        when it is given no address.
+        """
+        env = dict(os.environ)
+        path = list(sys.path)
+        yield
+        os.environ.clear()
+        os.environ.update(env)
+        sys.path[:] = path
+
     @pytest.fixture
     def captured(self, monkeypatch):
         """Replace the worker process so main() returns instead of looping."""
@@ -355,6 +392,19 @@ class TestCli:
         self.invoke(tmp_path)
 
         assert "/extra/path" in captured["sys_path_head"]
+
+    def test_leaves_the_process_streams_alone(self, captured, tmp_path):
+        """Slurm writes the worker's output file itself, via `--output`.
+
+        `logging.basicConfig` leaves the streams on the handles the process
+        inherited, and redirecting them here
+        would leave the file Slurm writes empty.
+        """
+        before = (sys.stdout, sys.stderr)
+
+        self.invoke(tmp_path)
+
+        assert captured["streams"] == before
 
     def test_rejects_missing_work_dir(self, captured, tmp_path):
         exit_code = self.invoke(tmp_path, **{"--work-dir": str(tmp_path / "nope")})

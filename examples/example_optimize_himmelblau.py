@@ -59,6 +59,11 @@ SETUP_SCRIPT = ""
 # The environment the fit runs in.
 # Same shape as SETUP_SCRIPT, but it has to bring botorch with it:
 # this is the group that imports `bayes_opt_botorch` on a compute node.
+#
+# Aliased to SETUP_SCRIPT because both are empty here,
+# which works only if `/etc/profile` already puts botorch on the path.
+# If the `opt` group's fits fail to import it, this is the line to fill in
+# --- a `conda activate` of an environment that has botorch, typically.
 OPTIMIZER_SETUP_SCRIPT = SETUP_SCRIPT
 
 NUM_NODES = 1
@@ -66,7 +71,7 @@ TASKS_PER_NODE = 40
 
 SBATCH_ARGS = [
     "--account=bii_nssac",
-    f"--partition=bii --nodes={NUM_NODES}",
+    f"--partition=bii --qos=bii-unlimited --nodes={NUM_NODES}",
     f"--ntasks-per-node={TASKS_PER_NODE} --cpus-per-task=1 --mem=0",
     "--time=1:00:00",
 ]
@@ -77,7 +82,7 @@ SBATCH_ARGS = [
 # The cores still matter --- torch threads the GP fit's linear algebra.
 OPTIMIZER_SBATCH_ARGS = [
     "--account=bii_nssac",
-    "--partition=bii --nodes=1",
+    "--partition=bii --qos=bii-unlimited --nodes=1",
     "--ntasks-per-node=1 --cpus-per-task=40 --mem=0",
     "--time=1:00:00",
 ]

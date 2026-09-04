@@ -10,6 +10,7 @@ so executor behaviour is isolated from worker behaviour.
 from __future__ import annotations
 
 import itertools
+import logging
 import subprocess
 from pathlib import Path
 
@@ -35,7 +36,9 @@ def drain(ds_client, queue: str, count: int) -> list[str]:
         task = ds_client.task_get("test-worker", queue)
         fn = cloudpickle.loads(task.function)
         args, kwargs = cloudpickle.loads(task.input)
-        ds_client.task_done(task.task_id, cloudpickle.dumps(fn(*args, **kwargs)))
+        ds_client.task_done(
+            task.task_id, "test-worker", cloudpickle.dumps(fn(*args, **kwargs))
+        )
         task_ids.append(task.task_id)
     return task_ids
 
@@ -45,7 +48,7 @@ def fail_one(ds_client, queue: str, error_id: str = "ERROR_test") -> str:
 
     task = ds_client.task_get("test-worker", queue)
     output = RemoteExecutionError(error="boom", error_id=error_id)
-    ds_client.task_done(task.task_id, cloudpickle.dumps(output))
+    ds_client.task_done(task.task_id, "test-worker", cloudpickle.dumps(output))
     return task.task_id
 
 
@@ -366,11 +369,34 @@ class TestSubmit:
             executor.submit(42, square, 1)
 
     def test_serializes_closures_and_lambdas(self, executor, ds_client):
+        """The captured variable has to survive the trip to the queue."""
         factor = 7
-        executor.submit("cpu", lambda x: x * factor, 6)
+        task = executor.submit("cpu", lambda x: x * factor, 6)
 
-        drain(ds_client, "cpu", 1)
-        # round-trip verified through as_completed below
+        (drained,) = drain(ds_client, "cpu", 1)
+
+        assert drained == task.task_id
+        assert cloudpickle.loads(ds_client.task_get_output(drained)) == 42
+
+    def test_submission_order_is_dispatch_order(self, executor, ds_client):
+        """Tasks are served oldest first.
+
+        ds-service dispatches the highest priority first,
+        so a priority that rises with time would hand out
+        the most recently submitted task and leave the oldest until last.
+        """
+        tasks = [executor.submit("cpu", square, i) for i in range(6)]
+
+        served = drain(ds_client, "cpu", 6)
+
+        assert served == [t.task_id for t in tasks]
+
+    def test_an_earlier_task_outranks_a_later_one(self, executor):
+        """The ordering above, read off the priorities themselves."""
+        first = executor.submit("cpu", square, 1)
+        second = executor.submit("cpu", square, 2)
+
+        assert first.priority > second.priority
 
 
 class TestAsCompleted:
@@ -462,7 +488,20 @@ class TestAsCompleted:
             with pytest.raises(RuntimeError, match="unknown to the task queue server"):
                 executor.wait([ghost_task()])
 
+    def test_canceled_task_raises(self, executor, ds_client, time_limit):
+        # `Canceled` arrived with ds-service 4.0.0.
+        # Nothing here cancels, so this is an out-of-band cancellation,
+        # and a state the poll loop does not name waits forever.
+        task = executor.submit("cpu", square, 3)
+        assert ds_client.task_cancel(task.task_id)
+
+        with time_limit(10, "as_completed never terminated for a canceled task"):
+            with pytest.raises(RuntimeError, match="was canceled"):
+                list(executor.as_completed([task]))
+
     def test_empty_task_list(self, executor):
+        # Nothing is pending, so neither the no-worker check
+        # nor the poll loop has anything to run against.
         assert list(executor.as_completed([])) == []
 
 
@@ -659,9 +698,6 @@ class TestNoWorkerStarted:
 
         assert [t.output for t in executor.as_completed([task])] == [25]
 
-    def test_an_empty_batch_is_fine(self, executor):
-        assert list(executor.as_completed([])) == []
-
 
 # --------------------------------------------------------------------------
 # stranded tasks
@@ -787,6 +823,79 @@ class TestStrandedTasks:
 # --------------------------------------------------------------------------
 # lifecycle
 # --------------------------------------------------------------------------
+
+
+class TestLogging:
+    """One executor, one log file.
+
+    The logger is named after the executor
+    because a name shared between them collects a handler per executor,
+    and every line then lands in every work dir opened in this process.
+    """
+
+    def test_two_executors_do_not_share_a_log_file(
+        self, ds_service_address, fake_slurm, tmp_path, setup_script
+    ):
+        first = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "first")
+        second = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "second")
+
+        # scale_workers is what logs; anything that writes a record will do.
+        second.define_worker("cpu", [], setup_script)
+        second.scale_workers("cpu", 1)
+
+        assert not (tmp_path / "first" / "executor.log").exists()
+        assert "Starting worker" in (tmp_path / "second" / "executor.log").read_text()
+
+        first.close()
+        second.close()
+
+    def test_each_executor_gets_exactly_one_handler(
+        self, ds_service_address, fake_slurm, tmp_path
+    ):
+        first = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "first")
+        second = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "second")
+
+        assert first.logger is not second.logger
+        assert len(first.logger.handlers) == 1
+        assert len(second.logger.handlers) == 1
+
+        first.close()
+        second.close()
+
+    def test_close_releases_the_log_file(
+        self, ds_service_address, fake_slurm, tmp_path, setup_script
+    ):
+        """The logger outlives the executor, so it must not keep the handler."""
+        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+        ex.define_worker("cpu", [], setup_script)
+        ex.scale_workers("cpu", 1)
+
+        ex.close()
+
+        assert ex.logger.handlers == []
+
+    def test_closing_twice_releases_it_once(
+        self, ds_service_address, fake_slurm, tmp_path
+    ):
+        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+
+        ex.close()
+        ex.close()  # must not raise
+
+        assert ex.logger.handlers == []
+
+    def test_records_do_not_reach_the_root_logger(
+        self, ds_service_address, fake_slurm, tmp_path, setup_script, caplog
+    ):
+        """The work dir is where these belong, not the importer's handlers."""
+        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+
+        with caplog.at_level(logging.INFO):
+            ex.define_worker("cpu", [], setup_script)
+            ex.scale_workers("cpu", 1)
+
+        assert "Starting worker" not in caplog.text
+        ex.close()
 
 
 class TestLifecycle:

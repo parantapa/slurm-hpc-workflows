@@ -203,7 +203,7 @@ Everything for a run lives under the executor's `work_dir`
 
 | File | Contents |
 | --- | --- |
-| `coordinator.log` | Worker submission and cancellation from the executor's side |
+| `executor.log` | Worker submission and cancellation from the executor's side |
 | `<worker-name>.sh`, `<worker-name>.sbatch` | The generated scripts — read these first when a job dies immediately |
 | `<worker-name>-<jobid>-<task>.out` | One per worker process: setup-script trace, task-by-task progress, full tracebacks |
 | `<worker-name>-<jobid>.out` | The batch job's own output — and the worker's log too, when the job is a single task |
@@ -255,6 +255,13 @@ Common failure modes:
     Either you forgot to scale the group,
     or the queue name is a typo — it is not checked at `submit` time,
     so compare it against your `define_worker` names.
+- **`RuntimeError: Task ... was canceled on the task queue server`.**
+    Somebody cancelled the task through the `ds-service` client directly
+    -- nothing in this library does.
+    A canceled task is never dispatched again
+    and never produces an output,
+    so waiting on it is reported rather than retried.
+    Resubmit it if you still want it run.
 - **`RuntimeError: ... tasks are on queues with no live pilot job`.**
     Raised while waiting: the group *was* scaled,
     but its jobs have since left the cluster

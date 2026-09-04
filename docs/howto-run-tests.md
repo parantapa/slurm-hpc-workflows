@@ -5,17 +5,23 @@
 From the repository root:
 
 ```sh
-pip install -ve .[test]
+pip install -ve .[test,dev]
 pytest
 ```
 
 The suite needs no Slurm cluster.
-Everything except the botorch tests runs in well under a second;
-those add ~10s, almost all of it GP fits.
+It takes about 40s end to end:
+~13s for everything but the botorch tests,
+and the rest is GP fits.
+Most of that first 13s is one ds-service process started per test,
+which is the price of testing against the real queue.
 
 The `[test]` extra pulls botorch, and so torch — a large download.
 Without it `test_bayes_opt_botorch.py` skips
 and the rest of the suite still runs.
+`[dev]` adds `black` and `pyright`,
+which the repository conventions require to be clean
+alongside a passing suite.
 
 ## What is real and what is mocked
 
@@ -56,7 +62,7 @@ Paths are relative to [`tests/`](../tests).
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
 | `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, acquisition, search behaviour (skips without botorch) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
-| `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks |
+| `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks, or of queue polls |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |
 
 ## Notes for future changes
@@ -67,6 +73,10 @@ Paths are relative to [`tests/`](../tests).
   `run_worker()` stops it with a `BaseException` raised from `task_done`
   after the expected number of tasks
   — that's why `StopWorker` is not an `Exception`.
+  `poll_worker()` counts `task_get` calls instead of completions,
+  which is the only way to bound a worker with nothing to run:
+  an empty queue completes no tasks,
+  so `run_worker` would never reach its limit.
 - **Tests are bounded by a wall-clock alarm.**
   The executor's polling loop and the worker's main loop
   both run until a condition holds,

@@ -25,7 +25,7 @@ dependencies = [
     "platformdirs",
     "cloudpickle",
     "typeguard>=3",
-    "ds-service-client>=2.2.0"
+    "ds-service-client>=4.0.0"
 ]
 
 [project.optional-dependencies]
@@ -39,6 +39,16 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Deprecations are the ones worth failing on:
+# they are how a dependency announces a break one release ahead,
+# and a warning nobody reads is a break discovered at the worst moment.
+# Everything else stays a warning
+# --- botorch is deliberately handed a constant objective in places,
+# and says so at runtime.
+filterwarnings = [
+    "error::DeprecationWarning",
+    "error::PendingDeprecationWarning",
+]
 
 # Pinned to the `requires-python` floor so formatting does not drift
 # with whatever Python happens to be running black.

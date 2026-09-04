@@ -19,7 +19,7 @@ so that the package keeps working without botorch installed.)
 | `define_worker(name, sbatch_args, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
 | `scale_workers(name, count)` | Submit or cancel pilot jobs so the group has `count` jobs. |
 | `submit(queue, fn, *args, **kwargs) -> Task` | Enqueue a task. `queue` is a group name or a list of them; `fn` is a callable, or a method name (`str`) for actor workers. |
-| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. Raises if a pending task's queues all lose their pilot jobs — see below. |
+| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. Raises `RuntimeError` rather than blocking forever on a task that can never finish — see below. |
 | `wait(tasks, desc=None, unit="task")` | Same, but discards the iterator — just block until all are done. |
 | `num_groups()` / `num_workers(detail=False)` | Counts of defined groups and submitted workers; `detail=True` returns a per-group dict. |
 | `stop()` | Cancel all pilot jobs, keep the executor usable. |
@@ -74,6 +74,19 @@ An executor that submits to a queue served by pilot jobs
 some other process launched will be refused;
 have the executor that waits be the one that scaled the group.
 
+Two more states end a wait, both read straight off the queue server:
+
+- **the server does not know the task id** —
+  `RuntimeError: Task ... is unknown to the task queue server`.
+  In practice a `Task` built by hand,
+  or one left over from a server that has since been restarted.
+- **the task was cancelled** —
+  `RuntimeError: Task ... was canceled on the task queue server`.
+  Nothing in this library cancels a task,
+  so this means somebody called `task_cancel` through the `ds-service`
+  client directly.
+  A cancelled task is never dispatched again, so waiting cannot help.
+
 Remaining `define_worker` options:
 
 | Argument | Default | Meaning |
@@ -91,6 +104,15 @@ Remaining `define_worker` options:
 `input`, and `output`. `output` is a sentinel until the task completes; after
 that it holds the return value — or a `RemoteExecutionError(error, error_id)`
 if the worker raised.
+
+`priority` is assigned by `submit` and orders the queue.
+`ds-service` dispatches the highest value first,
+and `submit` sets it from a negated wall clock,
+so tasks on one queue are served **oldest first**
+however many executors are feeding it.
+It is recorded on the `Task` for inspection;
+changing it there has no effect,
+since the value the server orders by was sent when the task was enqueued.
 
 ## `check_for_error(tasks, verbose=True)`
 

@@ -85,7 +85,19 @@ class FloatRange:
 
 @dataclass
 class CategoricalRange:
-    """Categorical range."""
+    """Categorical range.
+
+    `num_categories=1` is accepted, unlike a degenerate `IntRange`,
+    because a search space assembled programmatically
+    may legitimately end up with a one-valued category.
+    It is a dead dimension, though:
+    it standardizes to a constant,
+    so the GP is fit on a constant column
+    and the acquisition optimizes a coordinate that cannot move.
+    Drop the parameter and pass the value
+    through `extra_objective_kwargs` instead
+    when you know it has only one level.
+    """
 
     num_categories: int
 
@@ -202,7 +214,7 @@ def fit_and_propose(
 
 
 class BayesOptBotorch:
-    """A botorch based parallel bayesian optimzier.
+    """A botorch based parallel bayesian optimizer.
 
     Integer and categorical parameters are handled
     by rounding a continuous proposal,

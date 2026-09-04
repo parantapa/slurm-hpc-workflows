@@ -105,6 +105,24 @@ class TestSubmitSbatchJob:
         assert "SLURM_JOB_ID" not in env
         assert env["KEEP_ME"] == "yes"
 
+    def test_finds_the_job_id_after_a_banner(self, fake_slurm, tmp_path: Path):
+        """Sites put warnings and banners on sbatch's stdout.
+
+        The job id line is searched for rather than matched at the start,
+        so anything printed ahead of it is skipped
+        instead of failing a submission that in fact succeeded.
+        """
+        fake_slurm.sbatch_stdout_override = (
+            "sbatch: WARNING: your account is nearly out of hours\n"
+            "Submitted batch job 4242\n"
+        )
+
+        job = submit_sbatch_job(
+            name="myjob", sbatch_args=[], script="true", work_dir=tmp_path
+        )
+
+        assert job.job_id == 4242
+
     def test_raises_on_unparsable_sbatch_output(self, fake_slurm, tmp_path: Path):
         fake_slurm.sbatch_stdout_override = "something unexpected\n"
 

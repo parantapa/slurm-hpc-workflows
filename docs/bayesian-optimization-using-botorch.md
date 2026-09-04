@@ -196,7 +196,7 @@ which is what lets one model span all four kinds at once:
 | `FloatRange(min, max)` | `float` in `[min, max]` | |
 | `FloatRange(min, max, log_range=True)` | `float` in `[min, max]` | Searched in log space, so each decade gets equal budget. Needs `min > 0`. |
 | `IntRange(min, max)` | `int` in `[min, max]` | |
-| `CategoricalRange(n)` | `int` in `[0, n-1]` | An index — map it to your own values, as with `OPTIMIZERS` above. |
+| `CategoricalRange(n)` | `int` in `[0, n-1]` | An index — map it to your own values, as with `OPTIMIZERS` above. `n=1` is allowed but is a dead dimension: drop the parameter and pass the value through `**extra_objective_kwargs` instead. |
 
 Integer and categorical parameters are handled by rounding a continuous
 proposal, so on a mostly-discrete space with few levels
