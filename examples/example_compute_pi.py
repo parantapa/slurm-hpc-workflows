@@ -8,7 +8,6 @@ so that what you are reading is the *mechanism*.
 
 Run it from a Rivanna or BII login node:
 
-    module load apptainer/1.4.5
     pip install slurm-workflows
     python example_compute_pi.py
 
@@ -18,8 +17,8 @@ Before it will work you need two things.
    The compute nodes do not inherit your login shell,
    so whatever activates your environment
    has to run inside the job --- see `SETUP_SCRIPT` below.
-2. A `ds-service` binary the login node can run.
-   PB keeps an up to date apptainer image on `/project`, used below.
+2. `ds-service` on the login node's PATH.
+   `DsServiceServer` runs it from there.
 
 What actually happens, in order:
 
@@ -38,11 +37,6 @@ so the partial sums simply add up.
 
 from ds_service_client import DsServiceServer
 from slurm_workflows import SlurmPilotExecutor, check_for_error
-
-# How the login node starts the queue server.
-# It may be a whole command line, not just a path,
-# which is what lets the apptainer image be used directly.
-DS_SERVICE_BIN = "apptainer run /project/bii_nssac/people/pb5gj/shared/ds-service/latest/ds-service.sif"
 
 # Shell run inside each job before the worker starts.
 # Nothing is inherited from the login node,
@@ -102,7 +96,7 @@ def main():
     # `ib0`, the login node's InfiniBand interface.
     # A login node without `ib0` raises here,
     # rather than starting a server the workers cannot reach.
-    with DsServiceServer(interface="ib0", ds_service_bin=DS_SERVICE_BIN) as ds_service:
+    with DsServiceServer(interface="ib0") as ds_service:
         # The server may take a moment to start,
         # and a client that connects too early exits with an error.
         ds_service.wait_until_ready()
@@ -112,7 +106,10 @@ def main():
 
         # Leaving this block cancels every pilot job,
         # including if the body raises.
-        with SlurmPilotExecutor(address) as executor:
+        # The executor's name identifies this run:
+        # it prefixes every task id and worker job name,
+        # and its work dirs are collected under it in the cache dir.
+        with SlurmPilotExecutor("compute-pi", address) as executor:
             # Describes a kind of worker. Nothing is submitted yet.
             # The group name is also the queue name:
             # `submit("bii", ...)` is served only by workers in group `bii`.
@@ -135,7 +132,7 @@ def main():
             # instead of waiting for ten nodes to be available at once.
             executor.scale_workers("bii", 1)
 
-            num_steps = 100_000_000
+            num_steps = 1_000_000_000
             stepsize = 1.0 / num_steps
 
             # More tasks than workers, on purpose.

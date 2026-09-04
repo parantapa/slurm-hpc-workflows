@@ -13,6 +13,7 @@ import itertools
 import logging
 import subprocess
 from pathlib import Path
+from datetime import datetime
 
 import pytest
 import cloudpickle
@@ -92,6 +93,73 @@ def square(x):
 
 
 # --------------------------------------------------------------------------
+# name
+# --------------------------------------------------------------------------
+
+
+class TestExecutorName:
+    """The name identifies the executor, so it has to be usable everywhere."""
+
+    def test_it_prefixes_task_ids(self, executor):
+        task = executor.submit("cpu", square, 5)
+
+        assert task.task_id == "testex.task.0"
+
+    def test_it_prefixes_worker_job_names(self, executor, setup_script):
+        executor.define_worker(name="cpu", sbatch_args=[], setup_script=setup_script)
+        executor.scale_workers("cpu", 1)
+
+        assert list(executor.groups["cpu"].workers) == ["testex.worker.cpu.0"]
+
+    @pytest.mark.parametrize("name", ["ab", "a", ""])
+    def test_a_short_name_is_rejected(self, ds_service_address, name):
+        with pytest.raises(ValueError):
+            SlurmPilotExecutor(name, ds_service_address)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "1abc",  # must start with a letter
+            "_abc",
+            "-abc",
+            "abc def",  # a job name and a directory name
+            "abc.def",  # the separator in task ids and worker names
+            "abc/def",
+            "abc:def",  # the separator in key value store keys
+        ],
+    )
+    def test_an_unusable_name_is_rejected(self, ds_service_address, name):
+        with pytest.raises(ValueError):
+            SlurmPilotExecutor(name, ds_service_address)
+
+    @pytest.mark.parametrize("name", ["abc", "Run-1", "a_b", "abc123"])
+    def test_a_usable_name_is_accepted(self, ds_service_address, tmp_path, name):
+        ex = SlurmPilotExecutor(name, ds_service_address, work_dir=tmp_path / name)
+
+        assert ex.name == name
+        ex.close()
+
+    def test_rejects_a_non_string_name(self, ds_service_address):
+        with pytest.raises(TypeCheckError):
+            SlurmPilotExecutor(42, ds_service_address)  # type: ignore[arg-type]
+
+    def test_the_default_work_dir_is_under_the_name(
+        self, ds_service_address, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            spe.platformdirs, "user_cache_path", lambda **kwargs: tmp_path
+        )
+
+        ex = SlurmPilotExecutor("cached", ds_service_address)
+
+        # <cache>/<name>/<timestamp>, so one executor's runs sit together
+        # and two executors do not interleave theirs.
+        assert ex.work_dir.parent == tmp_path / "cached"
+        assert datetime.fromisoformat(ex.work_dir.name)
+        ex.close()
+
+
+# --------------------------------------------------------------------------
 # define_worker
 # --------------------------------------------------------------------------
 
@@ -126,6 +194,73 @@ class TestDefineWorker:
                 name="cpu", sbatch_args=["-A other"], setup_script=setup_script
             )
 
+    def test_actor_class_args_are_stored_in_the_key_value_store(
+        self, executor, ds_client
+    ):
+        executor.define_worker(
+            name="cpu",
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+            actor_class_args=[1, "two"],
+            actor_class_kwargs={"flag": True},
+        )
+
+        args = cloudpickle.loads(ds_client.map_get("actor_class_args:cpu"))
+        kwargs = cloudpickle.loads(ds_client.map_get("actor_class_kwargs:cpu"))
+        assert args == [1, "two"]
+        assert kwargs == {"flag": True}
+
+    def test_the_keys_are_named_for_the_group(self, executor, ds_client):
+        executor.define_worker(
+            name="gpu",
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+            actor_class_args=[1],
+        )
+
+        assert cloudpickle.loads(ds_client.map_get("actor_class_args:gpu")) == [1]
+        with pytest.raises(KeyError):
+            ds_client.map_get("actor_class_args:cpu")
+
+    def test_an_actor_without_arguments_stores_nothing(self, executor, ds_client):
+        executor.define_worker(
+            name="cpu",
+            sbatch_args=[],
+            actor_class_name="support_actor.CounterActor",
+        )
+
+        with pytest.raises(KeyError):
+            ds_client.map_get("actor_class_args:cpu")
+        with pytest.raises(KeyError):
+            ds_client.map_get("actor_class_kwargs:cpu")
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"actor_class_args": [1]},
+            {"actor_class_kwargs": {"flag": True}},
+        ],
+    )
+    def test_actor_arguments_need_an_actor_class(self, executor, extra):
+        with pytest.raises(ValueError):
+            executor.define_worker(name="cpu", sbatch_args=[], **extra)
+
+    def test_redefining_a_group_replaces_the_stored_arguments(
+        self, executor, ds_client
+    ):
+        common = dict(
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+        )
+        executor.define_worker(name="cpu", actor_class_args=[1], **common)
+
+        # The arguments are not part of the group's identity,
+        # so this is not the conflict that differing sbatch_args would be.
+        executor.define_worker(name="cpu", actor_class_args=[2], **common)
+
+        assert executor.num_groups() == 1
+        assert cloudpickle.loads(ds_client.map_get("actor_class_args:cpu")) == [2]
+
     def test_cwd_is_added_to_python_path_by_default(self, executor, setup_script):
         executor.define_worker(name="cpu", sbatch_args=[], setup_script=setup_script)
 
@@ -156,7 +291,7 @@ class TestDefineWorker:
         executor.define_worker(name="cpu", sbatch_args=[], setup_script=setup_script)
         executor.scale_workers("cpu", 1)
 
-        script = (executor.work_dir / "slurm_pilot_worker.cpu.0.sh").read_text()
+        script = (executor.work_dir / "testex.worker.cpu.0.sh").read_text()
         assert "module load gcc/14.2.0" in script
         assert "export TEST_SETUP=1" in script
 
@@ -174,7 +309,7 @@ class TestDefineWorker:
         executor.define_worker(name="cpu", sbatch_args=[])
         executor.scale_workers("cpu", 1)
 
-        script = (executor.work_dir / "slurm_pilot_worker.cpu.0.sh").read_text()
+        script = (executor.work_dir / "testex.worker.cpu.0.sh").read_text()
         assert script.startswith("#!/bin/bash")
         assert ". '/etc/profile'" in script
         assert "slurm-pilot-worker \\" in script
@@ -224,12 +359,12 @@ class TestScaleWorkers:
         defined.scale_workers("cpu", 2)
 
         names = [s.job_name for s in fake_slurm.submissions]
-        assert names == ["slurm_pilot_worker.cpu.0", "slurm_pilot_worker.cpu.1"]
+        assert names == ["testex.worker.cpu.0", "testex.worker.cpu.1"]
 
     def test_worker_script_is_written_and_executable(self, defined, fake_slurm):
         defined.scale_workers("cpu", 1)
 
-        script = defined.work_dir / "slurm_pilot_worker.cpu.0.sh"
+        script = defined.work_dir / "testex.worker.cpu.0.sh"
         assert script.exists()
         assert script.stat().st_mode & 0o111
         assert f"--server-address '{defined.server_address}'" in script.read_text()
@@ -242,7 +377,7 @@ class TestScaleWorkers:
         assert defined.num_workers() == 5
         # Indices keep increasing rather than restarting.
         names = [s.job_name for s in fake_slurm.submissions]
-        assert names[-1] == "slurm_pilot_worker.cpu.4"
+        assert names[-1] == "testex.worker.cpu.4"
 
     def test_scaling_to_same_count_is_a_no_op(self, defined, fake_slurm):
         defined.scale_workers("cpu", 2)
@@ -334,7 +469,7 @@ class TestScaleWorkers:
         (submission,) = fake_slurm.submissions
         _, per_task = srun_lines(submission.script_text)
         assert (
-            f"--output '{executor.work_dir}/slurm_pilot_worker.fanout.0-%j-%t.out'"
+            f"--output '{executor.work_dir}/testex.worker.fanout.0-%j-%t.out'"
             in per_task
         )
 
@@ -397,6 +532,52 @@ class TestSubmit:
         second = executor.submit("cpu", square, 2)
 
         assert first.priority > second.priority
+
+
+class TestTaskName:
+    def test_a_task_is_unnamed_to_start_with(self, executor):
+        task = executor.submit("cpu", square, 5)
+
+        assert task.task_name is None
+
+    def test_naming_records_it_on_the_task_and_the_server(self, executor, ds_client):
+        task = executor.submit("cpu", square, 5)
+
+        executor.set_task_name(task, "warmup")
+
+        assert task.task_name == "warmup"
+        assert ds_client.map_get(f"task_name:{task.task_id}") == b"warmup"
+
+    def test_renaming_replaces_both_copies(self, executor, ds_client):
+        task = executor.submit("cpu", square, 5)
+
+        executor.set_task_name(task, "first")
+        executor.set_task_name(task, "second")
+
+        assert task.task_name == "second"
+        assert ds_client.map_get(f"task_name:{task.task_id}") == b"second"
+
+    def test_each_task_is_named_separately(self, executor, ds_client):
+        first = executor.submit("cpu", square, 1)
+        second = executor.submit("cpu", square, 2)
+
+        executor.set_task_name(first, "one")
+
+        assert second.task_name is None
+        with pytest.raises(KeyError):
+            ds_client.map_get(f"task_name:{second.task_id}")
+
+    def test_the_property_is_read_only(self, executor):
+        task = executor.submit("cpu", square, 5)
+
+        with pytest.raises(AttributeError):
+            task.task_name = "direct"  # type: ignore[misc]
+
+    def test_rejects_a_non_string_name(self, executor):
+        task = executor.submit("cpu", square, 5)
+
+        with pytest.raises(TypeCheckError):
+            executor.set_task_name(task, 42)  # type: ignore[arg-type]
 
 
 class TestAsCompleted:
@@ -831,13 +1012,30 @@ class TestLogging:
     The logger is named after the executor
     because a name shared between them collects a handler per executor,
     and every line then lands in every work dir opened in this process.
+    That makes the name the identity here too,
+    so each test below uses its own
+    rather than inheriting the logger a previous test left in the registry.
     """
+
+    @staticmethod
+    def file_handlers(ex) -> list[logging.Handler]:
+        """The executor's own handlers.
+
+        Filtered, because the logging module's registry is global
+        and pytest's capture plugin puts handlers of its own on loggers
+        while a test runs.
+        """
+        return [h for h in ex.logger.handlers if isinstance(h, logging.FileHandler)]
 
     def test_two_executors_do_not_share_a_log_file(
         self, ds_service_address, fake_slurm, tmp_path, setup_script
     ):
-        first = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "first")
-        second = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "second")
+        first = SlurmPilotExecutor(
+            "sharedA", ds_service_address, work_dir=tmp_path / "first"
+        )
+        second = SlurmPilotExecutor(
+            "sharedB", ds_service_address, work_dir=tmp_path / "second"
+        )
 
         # scale_workers is what logs; anything that writes a record will do.
         second.define_worker("cpu", [], setup_script)
@@ -852,12 +1050,16 @@ class TestLogging:
     def test_each_executor_gets_exactly_one_handler(
         self, ds_service_address, fake_slurm, tmp_path
     ):
-        first = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "first")
-        second = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "second")
+        first = SlurmPilotExecutor(
+            "handlerA", ds_service_address, work_dir=tmp_path / "first"
+        )
+        second = SlurmPilotExecutor(
+            "handlerB", ds_service_address, work_dir=tmp_path / "second"
+        )
 
         assert first.logger is not second.logger
-        assert len(first.logger.handlers) == 1
-        assert len(second.logger.handlers) == 1
+        assert len(self.file_handlers(first)) == 1
+        assert len(self.file_handlers(second)) == 1
 
         first.close()
         second.close()
@@ -866,29 +1068,33 @@ class TestLogging:
         self, ds_service_address, fake_slurm, tmp_path, setup_script
     ):
         """The logger outlives the executor, so it must not keep the handler."""
-        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+        ex = SlurmPilotExecutor(
+            "closes", ds_service_address, work_dir=tmp_path / "work"
+        )
         ex.define_worker("cpu", [], setup_script)
         ex.scale_workers("cpu", 1)
 
         ex.close()
 
-        assert ex.logger.handlers == []
+        assert self.file_handlers(ex) == []
 
     def test_closing_twice_releases_it_once(
         self, ds_service_address, fake_slurm, tmp_path
     ):
-        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+        ex = SlurmPilotExecutor("twice", ds_service_address, work_dir=tmp_path / "work")
 
         ex.close()
         ex.close()  # must not raise
 
-        assert ex.logger.handlers == []
+        assert self.file_handlers(ex) == []
 
     def test_records_do_not_reach_the_root_logger(
         self, ds_service_address, fake_slurm, tmp_path, setup_script, caplog
     ):
         """The work dir is where these belong, not the importer's handlers."""
-        ex = SlurmPilotExecutor(ds_service_address, work_dir=tmp_path / "work")
+        ex = SlurmPilotExecutor(
+            "rootlog", ds_service_address, work_dir=tmp_path / "work"
+        )
 
         with caplog.at_level(logging.INFO):
             ex.define_worker("cpu", [], setup_script)
@@ -901,7 +1107,9 @@ class TestLogging:
 class TestLifecycle:
     def test_work_dir_is_created(self, ds_service_address, fake_slurm, tmp_path):
         work_dir = tmp_path / "nested" / "run"
-        ex = SlurmPilotExecutor(server_address=ds_service_address, work_dir=work_dir)
+        ex = SlurmPilotExecutor(
+            name="lifecycle", server_address=ds_service_address, work_dir=work_dir
+        )
 
         assert work_dir.is_dir()
         ex.close()

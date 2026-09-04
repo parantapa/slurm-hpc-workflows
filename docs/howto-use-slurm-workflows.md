@@ -42,7 +42,7 @@ conda activate my-env
 """
 
 # server_address points at your running ds-service instance.
-executor = SlurmPilotExecutor(server_address=DS_SERVICE_ADDRESS)
+executor = SlurmPilotExecutor(name="my-run", server_address=DS_SERVICE_ADDRESS)
 
 # 1. Describe a kind of worker (nothing is launched yet).
 executor.define_worker(
@@ -122,6 +122,28 @@ The class must be importable on the compute node.
 By default the executor's current working directory
 is added to the workers' `sys.path`; add more with `python_paths=[...]`.
 
+If the class takes constructor arguments,
+pass them with `actor_class_args` and `actor_class_kwargs`:
+
+```python
+class Model:
+    def __init__(self, checkpoint, device="cpu"):
+        self.model = load_expensive_model(checkpoint, device)
+
+executor.define_worker(
+    name="gpu",
+    sbatch_args=["-A my_alloc", "-p gpu", "--gres=gpu:1", "-t 02:00:00"],
+    actor_class_name="my_pkg.model.Model",
+    actor_class_args=["/project/checkpoints/v3.pt"],
+    actor_class_kwargs={"device": "cuda"},
+)
+```
+
+They travel through the task-queue server rather than the command line,
+so they are cloudpickled like task arguments are,
+and every worker in the group is constructed with the same ones.
+Both are only accepted alongside `actor_class_name`.
+
 ### One worker per job, or one per task
 
 `is_batch_worker` controls how many worker processes each Slurm job starts:
@@ -149,7 +171,7 @@ from slurm_workflows import SlurmPilotExecutor
 with DsServiceServer(interface="ib0", port=5051) as ds:
     ds.wait_until_ready()      # blocks until it accepts connections
 
-    executor = SlurmPilotExecutor(server_address=ds.address)
+    executor = SlurmPilotExecutor(name="my-run", server_address=ds.address)
     ...
 ```
 
@@ -171,9 +193,9 @@ rather than starting a server the workers cannot reach.
 Use the loopback interface (`lo`) only for a server
 that nothing outside the node needs to talk to.
 
+`DsServiceServer` runs `ds-service` from your `PATH`.
 `ds_service_bin` (or the `DS_SERVICE_BIN` environment variable)
-sets how the server is started, and may be a whole command line
-— `apptainer run ds-service.sif` works as well as a path to a binary.
+overrides that, and may be a whole command line rather than a path.
 
 ## Batch Bayesian optimization with botorch
 
@@ -196,6 +218,100 @@ It has its own guide:
 Every public name, argument and return type
 is listed in the **[API reference](api-reference.md)**.
 
+## Watching a run with `swtop`
+
+`swtop` polls a `ds-service` server and redraws what it finds,
+so a long run can be watched from another shell on the login node:
+
+```sh
+swtop 10.0.0.1:5051          # every 2 seconds
+swtop 10.0.0.1:5051 -i 10    # every 10 seconds
+```
+
+It takes the same `host:port` the executor was given, and runs until Ctrl-C.
+A frame looks like this:
+
+```
+swtop  10.0.0.1:5051  2026-01-30 11:04:57
+
+tasks  ready 118  running 40  complete 242  canceled 0  total 400
+
+workers (40)
+NAME                  GROUP  HOST      JOB      PID
+my-run.worker.cpu.0   cpu    udc-an28  1846231  31402
+my-run.worker.cpu.1   cpu    udc-an28  1846231  31403
+
+hosts (2)
+HOST      FREE MEM  LOAD   /dev/shm  /tmp
+udc-an28  212.4G    39.80  0.0%      12.5%
+udc-an29  9.1G      40.10  0.0%      98.2%
+
+slurm jobs (1)
+JOB      MEMORY  CPU
+1846231  148.2G  39.4 cores
+
+named tasks (2)
+NAME     TASK ID         STATE    WORKER
+train-7  my-run.task.7   Running  my-run.worker.cpu.0
+eval-2   my-run.task.12  Ready
+```
+
+The blocks come from different places, which is worth knowing
+when one of them looks empty:
+
+- **Task counts** are a single RPC, so they always cover every task.
+- **Workers** are the ones that have registered themselves,
+  which each pilot worker does when it starts.
+  An empty table with jobs in `squeue`
+  means the jobs are queued, or their setup script has not finished.
+- **Hosts and Slurm jobs** are sampled every 5 seconds by worker threads:
+  see [What the hosts and jobs blocks measure](#what-the-hosts-and-jobs-blocks-measure).
+- **Named tasks** are only those you have named:
+
+    ```python
+    task = executor.submit("cpu", train, config)
+    executor.set_task_name(task, "train-7")
+    ```
+
+    An unnamed task is still counted in the first block;
+    there is no RPC that lists tasks, so nothing else can be shown for it.
+
+If the server is unreachable, `swtop` says so in place of the tables
+and keeps polling rather than exiting.
+
+### What the hosts and jobs blocks measure
+
+Nothing has to be started for these:
+pilot workers do the sampling themselves.
+
+A node runs one worker per task slot,
+and a job spans many nodes,
+so the workers elect one of themselves per node and one per job
+(with a `ds-service` counter, first past the post)
+and only those run a sampling thread.
+Every 5 seconds each thread appends to a `ds-service` time series:
+
+| Column | What it is |
+| --- | --- |
+| `FREE MEM` | Memory available on the node, not counting cache |
+| `LOAD` | The node's 1 minute load average, over all its cpus |
+| `/dev/shm`, `/tmp` | How full each node-local scratch filesystem is |
+| `MEMORY` | The job's cgroup total on that node: every process and thread of the job, not just the workers |
+| `CPU` | Cores the job used, averaged since the previous sample |
+
+Read `LOAD` against the node's core count
+(40 on `bii`, so 39.80 is a full node and 80 is oversubscribed twice over),
+and `CPU` against what the job asked for
+(`--nodes=1 --ntasks-per-node=40 --cpus-per-task=1` should sit near 40).
+A `/tmp` climbing towards 100% is worth catching before it arrives;
+it takes the whole node down with it, not just your job.
+
+A subject marked `(stale)` has no reading in the last minute,
+which means the worker that was sampling it has gone --
+its job ended, or it was killed.
+The remaining workers do not take the job over,
+so a run that scales down loses the readings for what it gave up.
+
 ## Logs and troubleshooting
 
 Everything for a run lives under the executor's `work_dir`
@@ -207,6 +323,11 @@ Everything for a run lives under the executor's `work_dir`
 | `<worker-name>.sh`, `<worker-name>.sbatch` | The generated scripts — read these first when a job dies immediately |
 | `<worker-name>-<jobid>-<task>.out` | One per worker process: setup-script trace, task-by-task progress, full tracebacks |
 | `<worker-name>-<jobid>.out` | The batch job's own output — and the worker's log too, when the job is a single task |
+
+`<worker-name>` is `<executor-name>.worker.<group>.<index>`,
+which is also the Slurm job name, so `squeue` shows which run a job belongs to.
+The work dir itself defaults to
+`<cache dir>/slurm-workflows/<executor-name>/<timestamp>`.
 
 Slurm writes those files; the worker process doesn't redirect its own output.
 Which of the two you want depends on how the group was defined:

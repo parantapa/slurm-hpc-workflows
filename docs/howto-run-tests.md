@@ -10,10 +10,10 @@ pytest
 ```
 
 The suite needs no Slurm cluster.
-It takes about 40s end to end:
-~13s for everything but the botorch tests,
+It takes about 50s end to end:
+~24s for everything but the botorch tests,
 and the rest is GP fits.
-Most of that first 13s is one ds-service process started per test,
+Most of that first 24s is one ds-service process started per test,
 which is the price of testing against the real queue.
 
 The `[test]` extra pulls botorch, and so torch — a large download.
@@ -44,8 +44,7 @@ so a fresh process per test also means no state leaks between tests.
 The server is started by `DsServiceServer` from `ds-service-client`,
 which also decides where the binary comes from:
 `$DS_SERVICE_BIN` if it is set, otherwise `ds-service` on `$PATH`.
-`$DS_SERVICE_BIN` may be a whole command line rather than a path
-— `apptainer run ds-service.sif` works as well as `/usr/bin/ds-service`.
+`$DS_SERVICE_BIN` may be a whole command line rather than a path.
 
 If neither finds it, the tests that need a queue **skip**
 (the template and `slurm_utils` tests still run).
@@ -60,6 +59,8 @@ Paths are relative to [`tests/`](../tests).
 | `test_slurm_utils.py` | `sbatch`/`squeue`/`scancel` wrappers, `get_clean_environ` |
 | `test_executor.py` | `SlurmPilotExecutor`: worker groups, scaling, submit/poll, lifecycle |
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
+| `test_monitors.py` | The host and cgroup samplers and the monitor threads |
+| `test_swtop.py` | The `swtop` monitor: what it collects, how it renders, and the CLI |
 | `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, acquisition, search behaviour (skips without botorch) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks, or of queue polls |

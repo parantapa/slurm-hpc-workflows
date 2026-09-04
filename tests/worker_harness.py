@@ -66,16 +66,27 @@ def make_worker(
     group: str = "cpu",
     name: str = "worker-0",
     actor_class_name: str = "",
+    slurm_job_id: int = 42,
+    hostname: str = "testhost",
+    monitor_interval: float = 60.0,
 ) -> PilotWorkerProcess:
+    """A real worker against a real server.
+
+    The monitor interval is long by default:
+    the first worker on a host samples once as it starts,
+    which is what the tests look at,
+    and nothing here wants a thread sampling again mid-test.
+    """
     return PilotWorkerProcess(
         group=group,
         name=name,
         actor_class_name=actor_class_name,
         server_address=address,
         work_dir=Path(work_dir),
-        slurm_job_id=42,
-        hostname="testhost",
+        slurm_job_id=slurm_job_id,
+        hostname=hostname,
         pid=4242,
+        monitor_interval=monitor_interval,
     )
 
 

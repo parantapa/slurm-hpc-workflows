@@ -174,7 +174,7 @@ def main():
         ds_service.wait_until_ready()
         address = ds_service.address
 
-        with SlurmPilotExecutor(address) as executor:
+        with SlurmPilotExecutor(JOB_NAME, address) as executor:
             executor.define_worker(
                 name="eval",
                 sbatch_args=SBATCH_ARGS,

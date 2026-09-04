@@ -7,9 +7,11 @@ once the expected number of tasks have been reported done.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from slurm_workflows import slurm_pilot_worker as worker_mod
 from slurm_workflows.slurm_pilot_worker import slurm_pilot_worker
 from slurm_workflows.utils import RemoteExecutionError
 from worker_harness import make_worker, poll_worker, run_worker
+from test_monitors import wait_for
 
 
 @pytest.fixture(autouse=True)
@@ -201,6 +204,83 @@ class TestActors:
         assert len(support_actor.INSTANCES) == 1
         worker.close()
 
+    def test_constructor_arguments_come_from_the_key_value_store(
+        self, executor, ds_service_address, tmp_path
+    ):
+        executor.define_worker(
+            name="configured",
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+            actor_class_args=[1, "two"],
+            actor_class_kwargs={"flag": True},
+        )
+
+        worker = make_worker(
+            ds_service_address,
+            tmp_path,
+            group="configured",
+            actor_class_name="support_actor.ConfiguredActor",
+        )
+
+        actor = worker.actor_instance
+        assert actor is not None
+        assert actor.args == (1, "two")
+        assert actor.kwargs == {"flag": True}
+        worker.close()
+
+    def test_arguments_are_read_for_this_workers_group_only(
+        self, executor, ds_service_address, tmp_path
+    ):
+        executor.define_worker(
+            name="configured",
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+            actor_class_args=[1, "two"],
+        )
+
+        # Same actor class, a different group: the keys are group-scoped,
+        # so this worker is constructed with nothing.
+        worker = make_worker(
+            ds_service_address,
+            tmp_path,
+            group="cpu",
+            actor_class_name="support_actor.ConfiguredActor",
+        )
+
+        actor = worker.actor_instance
+        assert actor is not None
+        assert actor.args == ()
+        assert actor.kwargs == {}
+        worker.close()
+
+    def test_a_configured_actor_runs_tasks(
+        self, executor, ds_service_address, tmp_path
+    ):
+        executor.define_worker(
+            name="configured",
+            sbatch_args=[],
+            actor_class_name="support_actor.ConfiguredActor",
+            actor_class_args=[1],
+            actor_class_kwargs={"flag": True},
+        )
+        # `as_completed` refuses to wait on a queue with no pilot job,
+        # and the autouse fixture only declared one for "cpu".
+        executor.scale_workers("configured", 1)
+
+        task = executor.submit("configured", "config")
+
+        worker = make_worker(
+            ds_service_address,
+            tmp_path,
+            group="configured",
+            actor_class_name="support_actor.ConfiguredActor",
+        )
+        run_worker(worker, 1)
+        worker.close()
+
+        executor.wait([task])
+        assert task.output == ((1,), {"flag": True})
+
     def test_no_actor_by_default(self, ds_service_address, tmp_path):
         worker = make_worker(ds_service_address, tmp_path)
 
@@ -295,8 +375,152 @@ class TestWorkerIdentity:
     def test_worker_id_encodes_placement(self, ds_service_address, tmp_path):
         worker = make_worker(ds_service_address, tmp_path, group="cpu", name="w-1")
 
-        assert worker.worker_id == "cpu:w-1:42:testhost:4242"
+        assert worker.worker_id == "w-1.42.testhost.4242"
         worker.close()
+
+    def test_startup_publishes_the_workers_identity(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        worker = make_worker(ds_service_address, tmp_path, group="cpu", name="w-1")
+
+        published = json.loads(ds_client.map_get(f"worker_info:{worker.worker_id}"))
+
+        assert published == {
+            "group": "cpu",
+            "name": "w-1",
+            "slurm_job_id": 42,
+            "hostname": "testhost",
+            "pid": 4242,
+        }
+        worker.close()
+
+    def test_the_identity_is_one_key_not_one_per_field(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        """A reader between two writes must not see a half-described worker."""
+        worker = make_worker(ds_service_address, tmp_path, group="cpu", name="w-1")
+
+        assert ds_client.map_search_key(f"^worker_.*:{worker.worker_id}$") == [
+            f"worker_info:{worker.worker_id}"
+        ]
+        worker.close()
+
+    def test_two_workers_publish_separately(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        first = make_worker(ds_service_address, tmp_path, group="cpu", name="w-1")
+        second = make_worker(ds_service_address, tmp_path, group="gpu", name="w-2")
+
+        for worker, group in [(first, "cpu"), (second, "gpu")]:
+            published = json.loads(ds_client.map_get(f"worker_info:{worker.worker_id}"))
+            assert published["group"] == group
+        first.close()
+        second.close()
+
+    def test_identity_is_published_before_the_actor_is_built(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        """A worker that dies constructing its actor has still said where it was."""
+        with pytest.raises(AttributeError):
+            make_worker(
+                ds_service_address,
+                tmp_path,
+                group="cpu",
+                name="w-1",
+                actor_class_name="support_actor.Missing",
+            )
+
+        wid = "w-1.42.testhost.4242"
+        published = json.loads(ds_client.map_get(f"worker_info:{wid}"))
+        assert published["hostname"] == "testhost"
+
+
+class TestMonitors:
+    """One worker per node and per job does the sampling; the rest do not."""
+
+    def test_the_first_worker_takes_on_both(self, ds_service_address, tmp_path):
+        worker = make_worker(ds_service_address, tmp_path)
+
+        assert [m.subject for m in worker.monitors] == ["testhost", "42"]
+        worker.close()
+
+    def test_a_peer_on_the_same_node_and_job_takes_on_neither(
+        self, ds_service_address, tmp_path
+    ):
+        first = make_worker(ds_service_address, tmp_path, name="w-1")
+        second = make_worker(ds_service_address, tmp_path, name="w-2")
+
+        assert second.monitors == []
+        first.close()
+        second.close()
+
+    def test_a_worker_on_another_node_takes_on_that_node(
+        self, ds_service_address, tmp_path
+    ):
+        first = make_worker(ds_service_address, tmp_path)
+        second = make_worker(ds_service_address, tmp_path, hostname="othernode")
+
+        # Same job, so only the host is left to watch.
+        assert [m.subject for m in second.monitors] == ["othernode"]
+        first.close()
+        second.close()
+
+    def test_a_worker_in_another_job_takes_on_that_job(
+        self, ds_service_address, tmp_path
+    ):
+        first = make_worker(ds_service_address, tmp_path)
+        second = make_worker(ds_service_address, tmp_path, slurm_job_id=99)
+
+        assert [m.subject for m in second.monitors] == ["99"]
+        first.close()
+        second.close()
+
+    def test_the_election_is_a_counter_per_subject(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        first = make_worker(ds_service_address, tmp_path, name="w-1")
+        second = make_worker(ds_service_address, tmp_path, name="w-2")
+
+        assert ds_client.counter_get_current_value("host_monitor:testhost") == 2
+        assert ds_client.counter_get_current_value("slurm_job_monitor:42") == 2
+        first.close()
+        second.close()
+
+    def test_a_first_reading_is_published_at_startup(
+        self, ds_service_address, ds_client, tmp_path
+    ):
+        """The tables in swtop should not be empty until the first interval."""
+        worker = make_worker(ds_service_address, tmp_path)
+
+        assert wait_for(
+            lambda: bool(ds_client.time_series_get("host_free_memory:testhost"))
+        )
+        assert wait_for(lambda: bool(ds_client.time_series_get("slurm_job_memory:42")))
+        worker.close()
+
+    def test_a_failed_actor_leaves_none_of_them_running(
+        self, ds_service_address, tmp_path
+    ):
+        """close() is never called on a constructor that raised."""
+        before = {t for t in threading.enumerate()}
+
+        with pytest.raises(AttributeError):
+            make_worker(
+                ds_service_address, tmp_path, actor_class_name="support_actor.Missing"
+            )
+
+        leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+        assert leaked == []
+
+    def test_close_stops_them(self, ds_service_address, tmp_path):
+        worker = make_worker(ds_service_address, tmp_path)
+        monitors = list(worker.monitors)
+
+        worker.close()
+
+        assert monitors, "this worker was supposed to have started some"
+        assert not any(m.is_alive() for m in monitors)
+        assert worker.monitors == []
 
 
 class TestCli:

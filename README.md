@@ -17,6 +17,8 @@ so Slurm's queueing latency is paid once per worker instead of once per task.
     (loaded models, DB connections) warm across many tasks.
 - **Transparent serialization** — functions, arguments, and return values
     are transferred using [cloudpickle](https://github.com/cloudpipe/cloudpickle).
+- **Live queue view** — `swtop <server-address>` shows the tasks and the
+    pilot workers of a running job, refreshed every couple of seconds.
 - **Batch Bayesian optimization** — a [botorch](https://botorch.org/) based optimizer
     that proposes a whole batch of points at once
     and evaluates them across the worker pool,

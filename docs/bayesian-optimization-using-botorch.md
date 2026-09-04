@@ -35,7 +35,7 @@ space = {
     "optimizer": CategoricalRange(len(OPTIMIZERS)),
 }
 
-executor = SlurmPilotExecutor(server_address="10.0.0.1:5051")
+executor = SlurmPilotExecutor(name="my-search", server_address="10.0.0.1:5051")
 executor.define_worker("gpu", ["--partition gpu --gres gpu:1"], setup_script)
 executor.scale_workers("gpu", 8)
 

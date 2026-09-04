@@ -279,7 +279,7 @@ def fake_slurm(monkeypatch: pytest.MonkeyPatch) -> Generator[FakeSlurm]:
 def executor(ds_service_address: str, fake_slurm: FakeSlurm, tmp_path: Path):
     """An executor wired to the real queue server and the fake Slurm."""
     ex = SlurmPilotExecutor(
-        server_address=ds_service_address, work_dir=tmp_path / "work"
+        name="testex", server_address=ds_service_address, work_dir=tmp_path / "work"
     )
     yield ex
     ex.close()

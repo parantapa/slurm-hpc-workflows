@@ -200,7 +200,7 @@ class TestLoader:
 class TestWorkerSbatchScript:
     def render(
         self,
-        name: str = "slurm_pilot_worker.cpu.0",
+        name: str = "testex.worker.cpu.0",
         work_dir: str = "/scratch/work",
         is_batch_worker: bool = False,
         worker_script_path: str = "/path/to/worker.sh",
@@ -232,7 +232,7 @@ class TestWorkerSbatchScript:
         out = self.render()
 
         assert (
-            "srun --output '/scratch/work/slurm_pilot_worker.cpu.0-%j-%t.out' "
+            "srun --output '/scratch/work/testex.worker.cpu.0-%j-%t.out' "
             "/bin/bash '/path/to/worker.sh'" in out
         )
 
@@ -243,7 +243,7 @@ class TestWorkerSbatchScript:
         plain, per_task = srun_lines(out)
         assert plain == "srun /bin/bash '/path/to/worker.sh'"
         assert per_task == (
-            "srun --output '/scratch/work/slurm_pilot_worker.cpu.0-%j-%t.out' "
+            "srun --output '/scratch/work/testex.worker.cpu.0-%j-%t.out' "
             "/bin/bash '/path/to/worker.sh'"
         )
 
@@ -281,7 +281,7 @@ class TestOutputRedirectByTaskCount:
     def render(self) -> str:
         return render_template(
             "slurm_pilot:worker_sbatch_script",
-            name="slurm_pilot_worker.cpu.0",
+            name="testex.worker.cpu.0",
             work_dir="/scratch/work",
             is_batch_worker=False,
             worker_script_path="/path/to/worker.sh",
@@ -347,7 +347,7 @@ class TestOutputRedirectByTaskCount:
         out = run_sbatch_script(self.render(), tmp_path, **env).stdout
 
         assert srun_lines(out) == [
-            "srun --output /scratch/work/slurm_pilot_worker.cpu.0-%j-%t.out "
+            "srun --output /scratch/work/testex.worker.cpu.0-%j-%t.out "
             "/bin/bash /path/to/worker.sh"
         ]
 
@@ -425,7 +425,7 @@ class TestWorkerScript:
             worker_exe="slurm-pilot-worker",
             setup_script="module load gcc\nconda activate my-env",
             group="cpu",
-            name="slurm_pilot_worker.cpu.0",
+            name="testex.worker.cpu.0",
             actor_class_name="",
             server_address="10.0.0.1:5051",
             work_dir="/scratch/work",
@@ -461,7 +461,7 @@ class TestWorkerScript:
         out = self.render()
 
         assert "--group 'cpu'" in out
-        assert "--name 'slurm_pilot_worker.cpu.0'" in out
+        assert "--name 'testex.worker.cpu.0'" in out
         assert "--server-address '10.0.0.1:5051'" in out
         assert "--work-dir '/scratch/work'" in out
         assert """--python-paths-json '["/a", "/b"]'""" in out

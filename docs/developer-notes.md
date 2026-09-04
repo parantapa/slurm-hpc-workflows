@@ -50,10 +50,11 @@ and `[tool.pyright]` sets the include paths and `pythonVersion`.
 Both are therefore run bare:
 **do not pass paths to `pyright`**, or it ignores that configuration.
 
-`pyproject.toml` defines one console entry point, `slurm-pilot-worker`.
-It is internal.
-Generated sbatch scripts invoke it on the compute nodes;
-users never call it directly.
+`pyproject.toml` defines two console entry points.
+`slurm-pilot-worker` is internal:
+generated sbatch scripts invoke it on the compute nodes,
+and users never call it directly.
+`swtop` is for users, and is documented in the how-to.
 
 Deploy to clusters with `cpush`.
 See `.cpush.json5` for the `rivanna` and `ivy-hip-tricr-2` remotes.
@@ -66,6 +67,8 @@ See `.cpush.json5` for the `rivanna` and `ivy-hip-tricr-2` remotes.
 | `slurm_pilot_worker.py` | `PilotWorkerProcess` (runs inside Slurm jobs) and the `slurm-pilot-worker` CLI |
 | `slurm_utils.py` | `sbatch` / `squeue` / `scancel` wrappers, `get_clean_environ()` |
 | `bayes_opt_botorch.py` | `BayesOptBotorch` and the `ParameterRange` types |
+| `monitors.py` | Host and cgroup sampling, and the threads that publish it |
+| `swtop.py` | The `swtop` monitor: `Collector`, `render` and the CLI |
 | `templates/` | Jinja templates and their loader |
 | `utils.py` | `RemoteExecutionError`, id and logging helpers |
 
@@ -119,6 +122,61 @@ It is a wall clock rather than `perf_counter`
 because two executors on one queue have to be comparable,
 and `perf_counter`'s zero is the start of whichever process asked.
 
+**Actor constructor arguments travel through the key value store.**
+`define_worker` cloudpickles `actor_class_args` and `actor_class_kwargs`
+into `actor_class_args:<group>` and `actor_class_kwargs:<group>`,
+and `PilotWorkerProcess.__init__` reads them back under the same names.
+The two sides agree by convention alone,
+so the key format is part of the contract:
+change it in one place and workers silently construct actors
+with default arguments.
+A key is written only when a value is given,
+which is why the worker treats `KeyError` as "none were passed"
+rather than an error.
+The values are deliberately not kept on the `WorkerGroup`,
+so they are not part of what a redefinition is checked against:
+the store is the only copy, and the last `define_worker` call wins.
+
+**The executor's name is its identity.**
+It prefixes task ids, worker job names, script file names and the log,
+and it keys the executor's logger,
+so two live executors sharing a name collide on all of those
+and their log lines land in both work dirs.
+`SlurmPilotExecutor` validates it
+(`[A-Za-z][A-Za-z0-9_-]*`, at least 3 characters)
+because the characters that are safe in a Slurm job name,
+a directory name and a task id are the intersection of three sets,
+not one.
+
+**Workers publish their identity at startup, as one key.**
+`PilotWorkerProcess.__init__` writes `worker_info:<worker-id>`,
+a JSON object, before it builds the actor,
+so a worker that dies in its actor's constructor
+has still recorded which job and node it died on.
+One key and not five, because `swtop` caches what it reads:
+a reader landing between two writes would otherwise
+remember a worker whose host it never learned.
+`WORKER_INFO_PREFIX` lives in `slurm_pilot_worker.py`
+and is imported by `swtop.py`, so the two cannot drift apart.
+Nothing deletes the key:
+the store is in memory and dies with the server,
+which is the only cleanup there is.
+
+**Anything `__init__` starts, a failed `__init__` has to stop.**
+The monitors and the client are live before the actor is constructed,
+and an actor constructor that raises means `close()` is never called,
+so the worker stops its own monitors and closes its own channel
+before re-raising.
+
+**Task names are UTF-8 in the store, not pickles.**
+`set_task_name` writes `task_name:<task_id>` as encoded text,
+unlike the actor arguments beside it,
+because a name is a string and the point of storing it
+is that something other than this library can read it.
+`Task.task_name` is read only for the same reason:
+the store holds the other copy,
+and assigning the attribute would rename the task in this process alone.
+
 `setup_script` is inlined verbatim
 into the generated worker script (`{{ setup_script }}`).
 Nothing validates it.
@@ -126,12 +184,14 @@ Nothing validates it.
 ### Logging
 
 **The executor's logger is named after the executor**
-(`slurm_workflows.executor.<executor_id>`), and does not propagate.
+(`slurm_workflows.executor.<name>`), and does not propagate.
 A name shared between executors collects one `FileHandler` per executor,
 and every line then lands in every work dir opened in this process:
 the first executor's log fills up with the second's records.
 `close()` removes and closes the handler.
-The logger itself stays in the logging registry, inert.
+The logger itself stays in the logging registry, inert,
+which is why a test that reuses an executor name
+inherits whatever handlers the previous one left on it.
 
 ### Templates (`templates/`)
 
@@ -215,6 +275,53 @@ Use `{#` without the dash inside a body.
   and exploration alone lands near the minimum,
   so `best_point()` passes even with the sign flipped.
   [`howto-run-tests.md`](howto-run-tests.md) carries the measured margins.
+
+### Monitoring (`monitors.py`, `swtop.py`)
+
+**One worker per subject samples, and a counter decides which.**
+`counter_get_next_value` hands out distinct, gap-free values,
+so the worker told 1 for `host_monitor:<hostname>` takes the node
+and the one told 1 for `slurm_job_monitor:<job-id>` takes the job.
+No lock, no designated rank, and no need for the workers to know each other.
+Nothing hands a subject back when that worker dies:
+the series stops, and `swtop` marks it stale.
+Re-electing would need a heartbeat and a lease, which this does not have.
+
+**Sampling threads are daemons that swallow their errors.**
+A worker killed at the end of its walltime must not be held open by a
+monitor, and a failed sample must not end the series:
+a node briefly unreachable is the common case, and a gap beats a stop.
+`close()` stops them before closing the client whose channel they use.
+
+**CPU is a rate, differenced from a total.**
+The kernel reports CPU as microseconds that only rise,
+so `CgroupSampler` keeps the previous reading
+and the first sample of a run necessarily reports 0 cores.
+The cgroup's own accounting is preferred over summing processes
+because it covers every process and thread Slurm put in the job,
+including ones the worker never started.
+
+**`swtop` can only show what an RPC can answer.**
+`task_get_count_by_state` covers every task,
+but nothing enumerates tasks, workers, hosts or jobs,
+so every table is built by searching a key space
+for keys the executor, the workers and the monitors publish.
+A task nobody named cannot be listed, only counted.
+That is a property of the server, not a gap to be worked around here.
+
+**`swtop` reads only the tail of a series.**
+`time_series_get` with no bounds returns every point ever appended,
+which over a day-long run is most of the memory the server is holding.
+It asks for the last minute, and calls a subject with nothing there stale.
+
+**Identities are read once.**
+`Collector` caches every worker's fields and every task's name,
+because both are written once and never change.
+Without the cache a 400 worker pool would cost 2000 reads every 2 seconds.
+
+**A poll that fails is drawn, not raised.**
+A monitor that exits when the server blinks
+takes the screen down with it.
 
 ### Slurm interaction (`slurm_utils.py`)
 

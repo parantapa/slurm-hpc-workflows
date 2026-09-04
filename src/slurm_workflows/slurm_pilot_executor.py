@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import json
 import pickle
@@ -27,7 +28,6 @@ from .slurm_utils import (
 
 from .utils import (
     RemoteExecutionError,
-    gen_random_string,
     LOG_FORMAT,
     LOG_LEVEL,
 )
@@ -35,6 +35,13 @@ from .utils import (
 from .templates import render_template
 
 NoOutput = object()
+
+# What an executor may be called.
+# The name ends up in task ids, a logger name, a directory name
+# and every worker's job name,
+# so it is restricted to characters that are safe in all four.
+EXECUTOR_NAME_REGEX = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+MIN_EXECUTOR_NAME_LEN = 3
 
 POLL_INTERVAL_S: float = 0.1
 
@@ -52,6 +59,12 @@ class Task:
     function: Callable | str
     input: tuple
     output: Any
+    _task_name: str | None = None
+
+    @property
+    def task_name(self) -> str | None:
+        """The name given by `SlurmPilotExecutor.set_task_name`, or None."""
+        return self._task_name
 
 
 @dataclass
@@ -68,12 +81,25 @@ class WorkerGroup:
 
 
 class SlurmPilotExecutor:
+    @typechecked
     def __init__(
         self,
+        name: str,
         server_address: str,
         work_dir: Path | str | None = None,
     ):
-        self.executor_id = gen_random_string()
+        if len(name) < MIN_EXECUTOR_NAME_LEN:
+            raise ValueError(
+                f"Executor name {name!r} is shorter than "
+                f"{MIN_EXECUTOR_NAME_LEN} characters"
+            )
+        if EXECUTOR_NAME_REGEX.fullmatch(name) is None:
+            raise ValueError(
+                f"Executor name {name!r} must start with a letter "
+                f"and hold only letters, digits, '_' and '-'"
+            )
+
+        self.name = name
         self.next_task_index = 0
 
         self.server_address = server_address
@@ -81,16 +107,19 @@ class SlurmPilotExecutor:
 
         if work_dir is None:
             now = datetime.now().isoformat()
-            work_dir = platformdirs.user_cache_path(appname="slurm-workflows") / now
+            work_dir = (
+                platformdirs.user_cache_path(appname="slurm-workflows") / name / now
+            )
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         print(f"work directory: '{self.work_dir}'")
 
-        # A logger of this executor's own, keyed on its id.
-        # A name shared between executors would collect one handler per
+        # A logger of this executor's own, keyed on its name.
+        # A name shared between live executors would collect one handler per
         # executor, and every line would then be written to every work dir
-        # that had ever been opened in this process.
-        self.logger = logging.getLogger(f"slurm_workflows.executor.{self.executor_id}")
+        # that had ever been opened in this process,
+        # which is one more reason two of them must not share a name.
+        self.logger = logging.getLogger(f"slurm_workflows.executor.{self.name}")
         self.logger.setLevel(LOG_LEVEL)
         # These records belong in the work dir, not in whatever handler the
         # importing program happens to have put on the root logger.
@@ -115,6 +144,8 @@ class SlurmPilotExecutor:
         worker_exe: str = "slurm-pilot-worker",
         is_batch_worker: bool = False,
         actor_class_name: str | None = None,
+        actor_class_args: list[Any] | None = None,
+        actor_class_kwargs: dict[str, Any] | None = None,
         python_paths: list[str | Path] | None = None,
         add_cwd_to_python_path: bool = True,
     ) -> None:
@@ -126,6 +157,11 @@ class SlurmPilotExecutor:
             python_str_paths.append(str(Path.cwd()))
 
         if actor_class_name is None:
+            if actor_class_args is not None or actor_class_kwargs is not None:
+                raise ValueError(
+                    "actor_class_args and actor_class_kwargs "
+                    "need an actor_class_name to construct"
+                )
             actor_class_name = ""
 
         group = WorkerGroup(
@@ -143,15 +179,38 @@ class SlurmPilotExecutor:
         else:
             self.groups[group.name] = group
 
+        # The constructor arguments go to the workers through the key value
+        # store rather than the command line:
+        # they are arbitrary Python objects, so they are cloudpickled,
+        # and the worker reads them back keyed on its own group name.
+        #
+        # The arguments are not part of the group's identity,
+        # so redefining a group with different ones is not a conflict:
+        # the store simply takes the new values,
+        # which only the workers started after this call will read.
+        if actor_class_args is not None:
+            self.client.map_set(
+                f"actor_class_args:{name}",
+                cloudpickle.dumps(actor_class_args, protocol=pickle.HIGHEST_PROTOCOL),
+            )
+        if actor_class_kwargs is not None:
+            self.client.map_set(
+                f"actor_class_kwargs:{name}",
+                cloudpickle.dumps(actor_class_kwargs, protocol=pickle.HIGHEST_PROTOCOL),
+            )
+
     def _add_worker(self, group: WorkerGroup) -> None:
         worker_index = group.next_worker_index
         group.next_worker_index += 1
-        name = f"slurm_pilot_worker.{group.name}.{worker_index}"
+        # The executor's name leads, so a worker's job name says which
+        # executor submitted it, and two executors sharing a cluster
+        # do not produce identically named jobs and script files.
+        worker_name = f"{self.name}.worker.{group.name}.{worker_index}"
 
         worker_script = render_template(
             "slurm_pilot:worker_script",
             group=group.name,
-            name=name,
+            name=worker_name,
             server_address=self.server_address,
             worker_exe=group.worker_exe,
             work_dir=self.work_dir,
@@ -159,27 +218,27 @@ class SlurmPilotExecutor:
             setup_script=group.setup_script,
             actor_class_name=group.actor_class_name,
         )
-        worker_script_path = self.work_dir / f"{name}.sh"
+        worker_script_path = self.work_dir / f"{worker_name}.sh"
         worker_script_path.write_text(worker_script)
         worker_script_path.chmod(0o755)
 
         worker_sbatch_script = render_template(
             "slurm_pilot:worker_sbatch_script",
-            name=name,
+            name=worker_name,
             work_dir=self.work_dir,
             is_batch_worker=group.is_batch_worker,
             worker_script_path=worker_script_path,
         )
 
-        self.logger.info("Starting worker %s", name)
+        self.logger.info("Starting worker %s", worker_name)
         try:
             slurm_job = submit_sbatch_job(
-                name=name,
+                name=worker_name,
                 sbatch_args=group.sbatch_args,
                 script=worker_sbatch_script,
                 work_dir=self.work_dir,
             )
-            group.workers[name] = slurm_job
+            group.workers[worker_name] = slurm_job
         except subprocess.CalledProcessError as cp:
             print(f"Failed to submit slurm job: returncode={cp.returncode}")
             if cp.stdout.strip():
@@ -258,7 +317,7 @@ class SlurmPilotExecutor:
             (args, kwargs), protocol=pickle.HIGHEST_PROTOCOL
         )
 
-        task_id = f"{self.executor_id}:{self.next_task_index}"
+        task_id = f"{self.name}.task.{self.next_task_index}"
         self.next_task_index += 1
 
         task = Task(
@@ -278,6 +337,19 @@ class SlurmPilotExecutor:
             input=input_bytes,
         )
         return task
+
+    @typechecked
+    def set_task_name(self, task: Task, name: str) -> None:
+        """Give `task` a name, on the queue server as well as locally.
+
+        The name is for whoever is reading the queue:
+        nothing in this library dispatches on it.
+        """
+        # Recorded on the server first,
+        # so a failed write leaves the task without a local name
+        # rather than with one nothing else can see.
+        self.client.map_set(f"task_name:{task.task_id}", name.encode("utf-8"))
+        task._task_name = name
 
     @typechecked
     def submit(

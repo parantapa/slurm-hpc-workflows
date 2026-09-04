@@ -25,6 +25,7 @@ dependencies = [
     "platformdirs",
     "cloudpickle",
     "typeguard>=3",
+    "psutil",
     "ds-service-client>=4.0.0"
 ]
 
@@ -67,3 +68,4 @@ fallback_version = "1.0.0-dev"
 
 [project.scripts]
 "slurm-pilot-worker" = "slurm_workflows.slurm_pilot_worker:slurm_pilot_worker"
+"swtop" = "slurm_workflows.swtop:swtop"

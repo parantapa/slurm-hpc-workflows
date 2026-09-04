@@ -16,8 +16,19 @@ import cloudpickle
 from ds_service_client import DsServiceClient, NoTaskAvailable
 
 from .utils import gen_error_id, RemoteExecutionError, LOG_FORMAT, LOG_LEVEL
+from .monitors import (
+    DEFAULT_MONITOR_INTERVAL_S,
+    Monitor,
+    start_host_monitor,
+    start_slurm_job_monitor,
+)
 
 NEXT_TASK_RETRY_TIME_S: float = 0.1
+
+# Where a worker says what and where it is, keyed on its worker id.
+# `swtop` reads it back, so the name and the JSON fields under it
+# are a contract between the two.
+WORKER_INFO_PREFIX = "worker_info:"
 
 
 class PilotWorkerProcess:
@@ -31,28 +42,139 @@ class PilotWorkerProcess:
         slurm_job_id: int,
         hostname: str,
         pid: int,
+        monitor_interval: float = DEFAULT_MONITOR_INTERVAL_S,
     ):
         self.group = group
+        self.name = name
         self.server_address = server_address
         self.work_dir = work_dir
 
-        self.worker_id = "%s:%s:%s:%s:%s" % (group, name, slurm_job_id, hostname, pid)
+        # The worker's name leads, so the id opens with what the executor
+        # called this worker (`<executor>.worker.<group>.<index>`),
+        # and the placement that name cannot know follows it.
+        # No group of its own: the name already carries one.
+        self.worker_id = "%s.%s.%s.%s" % (name, slurm_job_id, hostname, pid)
         self.logger = logging.getLogger("worker_process")
         self.client = DsServiceClient(self.server_address)
 
-        self.actor_instance: Any | None
-        if actor_class_name == "":
-            self.actor_instance = None
-        else:
-            class_name_parts = actor_class_name.split(".")
-            module_name = ".".join(class_name_parts[:-1])
-            class_name = class_name_parts[-1]
+        # Published before the actor is built,
+        # so a worker that dies in its actor's constructor
+        # has still said which job and host it died on.
+        self._publish_identity(slurm_job_id, hostname, pid)
 
-            module = importlib.import_module(module_name)
-            klass = getattr(module, class_name)
-            self.actor_instance = klass()
+        self.monitors: list[Monitor] = []
+        self._start_monitors(hostname, slurm_job_id, monitor_interval)
+
+        self.actor_instance: Any | None
+        try:
+            self.actor_instance = self._build_actor(actor_class_name)
+        except Exception:
+            # Nothing calls `close()` on a worker whose constructor raised,
+            # so the threads and the channel started above
+            # would outlive the object that owns them.
+            self._stop_monitors()
+            self.client.close()
+            raise
+
+    def _build_actor(self, actor_class_name: str) -> Any | None:
+        """Import and construct this group's actor, if it has one."""
+        if actor_class_name == "":
+            return None
+
+        class_name_parts = actor_class_name.split(".")
+        module_name = ".".join(class_name_parts[:-1])
+        class_name = class_name_parts[-1]
+
+        module = importlib.import_module(module_name)
+        klass = getattr(module, class_name)
+
+        args = self._get_actor_ctor_arg(f"actor_class_args:{self.group}", [])
+        kwargs = self._get_actor_ctor_arg(f"actor_class_kwargs:{self.group}", {})
+        return klass(*args, **kwargs)
+
+    def _publish_identity(self, slurm_job_id: int, hostname: str, pid: int) -> None:
+        """Record who this worker is in the key value store.
+
+        The worker id alone reaches the coordinator, through `task_get`,
+        and it is the only handle anything else has on a worker,
+        so the parts that identify the process it names are published
+        under it.
+
+        One key, not one per field:
+        a reader that arrives between two writes would otherwise see a
+        worker whose id is known and whose host is not.
+        JSON rather than a pickle, for the same reason task names are text:
+        the point of publishing this is that another program can read it.
+        """
+        identity = {
+            "group": self.group,
+            "name": self.name,
+            "slurm_job_id": slurm_job_id,
+            "hostname": hostname,
+            "pid": pid,
+        }
+        self.client.map_set(
+            f"{WORKER_INFO_PREFIX}{self.worker_id}",
+            json.dumps(identity).encode("utf-8"),
+        )
+
+    def _start_monitors(
+        self, hostname: str, slurm_job_id: int, interval: float
+    ) -> None:
+        """Take on monitoring this node and this job, if nobody else has.
+
+        A node runs one worker per task slot and a job spans many nodes,
+        so most workers here have a peer already watching the same thing.
+        The counters are the election:
+        `counter_get_next_value` hands out distinct, gap-free values,
+        so exactly one worker per host and one per job is told 1,
+        with no lock and no designated rank.
+
+        Nothing hands the job back if that worker dies.
+        The series simply stops, which `swtop` shows as stale.
+        """
+        if self.client.counter_get_next_value(f"host_monitor:{hostname}") == 1:
+            self.logger.info("Monitoring host %s", hostname)
+            self.monitors.append(
+                start_host_monitor(self.client, hostname, interval, self.logger)
+            )
+
+        counter = f"slurm_job_monitor:{slurm_job_id}"
+        if self.client.counter_get_next_value(counter) == 1:
+            self.logger.info("Monitoring slurm job %s", slurm_job_id)
+            self.monitors.append(
+                start_slurm_job_monitor(
+                    self.client, slurm_job_id, interval, self.logger
+                )
+            )
+
+    def _get_actor_ctor_arg(self, key: str, default: Any) -> Any:
+        """Read one cloudpickled constructor argument out of the key value store.
+
+        A missing key means the caller passed nothing for it,
+        which is the common case:
+        `define_worker` writes a key only when it is given a value.
+        """
+        try:
+            value = self.client.map_get(key)
+        except KeyError:
+            return default
+        return cloudpickle.loads(value)
+
+    def _stop_monitors(self) -> None:
+        """Stop whatever monitoring this worker took on.
+
+        Idempotent, and safe on a half-built worker:
+        the list exists before the first monitor is started.
+        """
+        for monitor in self.monitors:
+            monitor.stop()
+        self.monitors.clear()
 
     def close(self):
+        # Before the client, whose channel they are using.
+        self._stop_monitors()
+
         self.client.close()
         if self.actor_instance is not None:
             if hasattr(self.actor_instance, "close"):

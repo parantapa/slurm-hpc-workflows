@@ -37,6 +37,17 @@ class CounterActor:
         self.closed = True
 
 
+class ConfiguredActor:
+    """Keeps whatever constructor arguments it was handed."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def config(self) -> tuple[tuple, dict]:
+        return self.args, self.kwargs
+
+
 class NoCloseActor:
     """Has no close(); exercises the optional-cleanup branch."""
 
