@@ -1,11 +1,22 @@
 # Batch Bayesian optimization with botorch
 
-`slurm_workflows.bayes_opt_botorch`
+`slurm_workflows.optimize_space_botorch`
 fits one Gaussian process to everything measured so far
 and asks for a *batch* of points at once,
 chosen jointly so they do not stack on the same spot.
 A round is `search_parallelism` workers busy at once,
 then one model fit, then the next round.
+
+A run has two phases, and they are two classes:
+
+1. **Explore.** `ExploreSpaceSobolQMC` sweeps the space with a Sobol'
+   design and saves what it measured.
+   See [Exploring without a model](#exploring-without-a-model).
+2. **Optimize.** `OptimizeSpaceBotorch` reads that file and searches from it.
+
+They are separate because the second is resumable:
+the optimizer starts from files, so a search that ran out of walltime
+carries on in the next job from what the last one saved.
 
 botorch is an optional dependency:
 
@@ -15,8 +26,12 @@ pip install -U slurm-workflows[botorch]
 
 ```python
 from slurm_workflows import SlurmPilotExecutor
-from slurm_workflows.bayes_opt_botorch import (
-    BayesOptBotorch, IntRange, FloatRange, CategoricalRange,
+from slurm_workflows.explore_space import ExplorationTask, ExploreSpaceSobolQMC
+from slurm_workflows.optimize_space_botorch import (
+    OptimizationTask, OptimizeSpaceBotorch,
+)
+from slurm_workflows.search_space import (
+    IntRange, FloatRange, CategoricalRange,
 )
 
 OPTIMIZERS = ["adam", "sgd"]
@@ -43,30 +58,55 @@ executor.scale_workers("gpu", 8)
 executor.define_worker("fit", ["--partition standard --cpus-per-task 8"], fit_setup)
 executor.scale_workers("fit", 1)
 
-opt = BayesOptBotorch(
-    "lr-search",   # job name, used in progress bars and error messages
-    space,
-    train,
+# Phase 1: a Sobol' sweep, saved to a file.
+sweep = ExploreSpaceSobolQMC(
+    [
+        ExplorationTask(
+            "lr-search",   # task name: labels the output, keys the results
+            space,
+            train,
+            "gpu",         # where evaluations run (or a list of queues)
+            16,            # exploration points, floored to a power of two
+            20260730,      # seed (optional, drawn and printed if omitted)
+            extra_objective_kwargs={"epochs": 20},
+        )
+    ],
     executor,
-    "gpu",         # objective_queue: where evaluations run (or a list)
-    "fit",         # optimizer_queue: where the model is fit (or a list)
-    16,            # exploration points, Sobol'
-    8,             # points evaluated in parallel per round
-    20260730,      # seed for the exploration design (optional)
-    min_search_iterations=5,    # rounds that always run
-    max_search_iterations=30,   # hard ceiling
-    patience=3,                 # stalled rounds in a row that end the search
-    min_improvement=0.05,       # what a round must beat the incumbent by
-    epochs=20,     # extra kwargs are passed through to the objective
 )
+sweep.run_exploration_jobs()
+sweep.save("explore.pkl.gz")
 
-opt.run_exploration_jobs()
+# Phase 2: the search, starting from that file.
+opt = OptimizeSpaceBotorch(
+    [
+        OptimizationTask(
+            "lr-search",   # the same name: this is how the file is read
+            space,
+            train,
+            "gpu",         # objective_queue: where evaluations run
+            "fit",         # optimizer_queue: where the model is fit
+            8,             # points evaluated in parallel per round
+            min_search_iterations=5,    # rounds that always run
+            max_search_iterations=30,   # hard ceiling
+            patience=3,                 # stalled rounds in a row that stop it
+            min_improvement=0.05,       # what a round must beat the incumbent by
+            extra_objective_kwargs={"epochs": 20},
+        )
+    ],
+    executor,
+    ["explore.pkl.gz"],
+)
 opt.run_search_jobs()
+opt.save("search.pkl.gz")
 
-params, value = opt.best_point()
+params, value = opt.best_point("lr-search")
 print(f"best loss {value} at {params}")
-print(f"whole result: {opt.best_output()}")
+print(f"whole result: {opt.best_output('lr-search')}")
 ```
+
+Both classes take a **list** of tasks and run them together:
+two spaces are explored in one batch, and their searches share every round,
+rather than one waiting for the other to finish with the pool.
 
 The objective's argument names must match the keys of `space`,
 and it takes them as keyword arguments.
@@ -88,32 +128,44 @@ and nothing else: the named key is modelled,
 every other key is recorded.
 Use it for an objective that already reports under another name.
 
-**Two phases.** `run_exploration_jobs` submits a scrambled Sobol' design
-in one batch — a space-filling sweep that costs one round trip
-and gives the GP something to model.
-The count is truncated down to a power of two,
-because that is where a Sobol' sequence is balanced.
-The design is scrambled with the `seed` you pass,
-so a rerun with the same seed explores the same points
-and a second run with a different seed explores fresh ones.
+`extra_objective_kwargs` carries anything else the objective needs
+but the search should not vary.
+It may not shadow a key of `space`, which is rejected up front.
 
-The seed is optional. Omit it and one is drawn from `os.urandom`,
-then printed and kept in `opt.seed`:
+**Where the observations come from.** `OptimizeSpaceBotorch` does not
+explore. It is given results files --- what `ExploreSpaceSobolQMC.save`
+wrote, and what its own `save` writes --- and models everything they hold
+under each task's name. A task with nothing under its name in any of them
+is an error rather than a search with no model:
 
 ```
-lr-search: no seed given, drew 1778551843323245695 --- pass it back to repeat this run
+lr-search: no observations in the given files; explore the space first,
+and pass what ExploreSpaceSobolQMC.save() wrote
 ```
 
-Pass that number back as the seed to repeat the design.
-It is drawn from `os.urandom` rather than the `random` module,
-so seeding the global RNG elsewhere in your script
-does not make every "unseeded" run identical.
-All arguments up to and including the seed are positional-only,
-which frees `**extra_objective_kwargs`
-to use the optimizer's own parameter names.
-They may not shadow a key of `space`, which is rejected up front.
+The file carries the points as the objective saw them, so the unit cube
+coordinates are recomputed against the space the task declares,
+and a point that space cannot place is reported rather than fit on:
+a parameter missing or one too many, a range since narrowed past the point,
+or a value a log range cannot take.
 
-`run_search_jobs` then runs rounds until the search stops improving.
+**Resuming.** `save` writes only what *that* run measured, so the files
+concatenate without double counting:
+
+```python
+# a later job, carrying on from both
+opt = OptimizeSpaceBotorch(
+    tasks, executor, ["explore.pkl.gz", "search.pkl.gz"]
+)
+opt.run_search_jobs()
+opt.save("search-2.pkl.gz")
+```
+
+Each run reads every file before it and writes one of its own,
+so a search that ran out of walltime resumes with everything it had,
+and `best_point(name)` covers the files as well as the current run.
+
+`run_search_jobs` runs rounds until the search stops improving.
 Each round: fit a `SingleTaskGP` to every point measured so far,
 ask `qLogNoisyExpectedImprovement` for the whole batch in one call,
 submit all of them, and wait.
@@ -179,15 +231,25 @@ Fit duration grows superlinearly with the number of observations:
 a search that slows round after round
 is spending its time in the model rather than in the objective.
 
-Both phases block until every point in flight has come back.
+Both classes block until every point in flight has come back.
 A worker that raises does not raise on the driver —
-so both phases run `check_for_error` themselves
-and raise a `RuntimeError`
+so both wait with `RaiseOnError.RAISE_AFTER_COMPLETED`
+and turn what comes back into a `RuntimeError`
 rather than feeding a `RemoteExecutionError` into the model.
+Deferred rather than immediate,
+so one failed evaluation does not hide the rest of its batch,
+and the exception names which tasks failed.
+What did come back is recorded before the exception is raised,
+so `save()` still holds the batch's good points
+and the next run resumes from them.
 An objective returning `NaN` or `inf` is rejected the same way,
 since either one silently poisons the GP fit.
 
-**Search spaces.** Every parameter is mapped into `[0, 1]` before the GP
+**Search spaces.** They live in `slurm_workflows.search_space`,
+which imports neither torch nor botorch,
+so a space can be built and unit-tested without an optimizer installed.
+
+Every parameter is mapped into `[0, 1]` before the GP
 sees it and mapped back for the objective,
 which is what lets one model span all four kinds at once:
 
@@ -204,21 +266,26 @@ expect the search to re-evaluate points it has already seen.
 The model records where the objective *actually* ran, after rounding,
 not the continuous proposal.
 
-`run_search_jobs` needs something to model,
-so it raises unless points have already been evaluated
-— call `run_exploration_jobs` first.
-It can then be called again for another run of rounds,
+`run_search_jobs` can be called again for another set of rounds,
 modelling everything the earlier calls measured.
-`best_point()` returns the best `(params, value)` seen by either phase,
-and raises if nothing has been evaluated yet.
-`best_output()` returns the whole mapping the objective produced there,
-and `outputs` holds one such mapping per evaluation,
-in the same order as `points` and `values`.
+Every member takes the task's name, since a run holds several:
+
+| Member | What it is |
+| --- | --- |
+| `tasks` | The tasks as they will run, with the parallelism filled in. The caller's own `OptimizationTask` objects are left alone. |
+| `run_search_jobs()` | Round after round, every task advancing together, until each one stops. |
+| `best_point(name)` / `best_output(name)` | That task's best `(params, value)`, and the objective's whole result there, over the files as well as this run. |
+| `results[name]` | What *this* run measured: `points`, `values`, `outputs` and `unit_points`, in submission order. |
+| `prior[name]` | What the files held, in the same shape. |
+| `observations(name)` / `num_observations(name)` | Everything the model is fit on, the two together. |
+| `dim(name)` | Dimensionality of that task's space. |
+| `save(path)` | Write this run's results, in the shape the files are read in. |
 
 ## Where the work runs
 
 Nothing heavy runs on the driver.
-A search round is two kinds of task on two queues:
+A search round is two kinds of task on two queues,
+each kind submitted for every task at once and waited for once:
 
 | Queue | Tasks per round | Needs |
 | --- | --- | --- |
@@ -232,6 +299,11 @@ and whose cost grows superlinearly with the number of observations.
 Pointing both at one queue is supported and cannot deadlock,
 since a round never has both kinds in flight at once;
 the fit then waits for a slot in a pool sized for the objective.
+
+With several tasks in one run, a round submits every task's fit together
+and then every task's batch together, so the pool is filled by all of them
+rather than by whichever task is having its turn.
+Tasks drop out independently as each meets its own stopping rule.
 
 botorch has to be importable in two places:
 on the driver, which imports this module,
@@ -258,12 +330,10 @@ all of them settings of one run rather than of the process:
 | `acqf_timeout_s` | 10.0 | Wall-clock budget for one `optimize_acqf` call. |
 
 ```python
-opt = BayesOptBotorch(
-    ..., num_restarts=20, acqf_timeout_s=60.0,
-)
+OptimizationTask(..., num_restarts=20, acqf_timeout_s=60.0)
 ```
 
-Each is kept on the optimizer and passed to every fit task,
+Each is kept on the task and passed to every fit task,
 so a run is tuned by constructing it
 and nothing has to be redeployed to the compute nodes.
 The worker never reads these for itself.
@@ -282,3 +352,101 @@ that a better batch is worth the extra minutes.
 [`examples/example_optimize_himmelblau.py`](../examples/example_optimize_himmelblau.py)
 runs this on a cluster,
 with an `eval` pool for the objective and a one-worker `opt` pool for the fit.
+
+## Exploring without a model
+
+`slurm_workflows.explore_space.ExploreSpaceSobolQMC`
+is the exploration phase on its own:
+a Sobol' sweep of a search space, evaluated across the pool,
+with nothing fitted afterwards.
+Use it for a first look at a space,
+for a baseline to judge a search against,
+or when the budget is one wave of evaluations and there is no second round.
+
+It draws with scipy rather than botorch,
+so it needs neither botorch nor torch — on the driver or on the workers.
+
+A sweep takes a **list of `ExplorationTask`s**, one per space,
+and runs them all at once:
+
+```python
+from slurm_workflows.explore_space import ExplorationTask, ExploreSpaceSobolQMC
+
+sweep = ExploreSpaceSobolQMC(
+    [
+        ExplorationTask(
+            "coarse",       # names this task: labels its output, keys its results
+            SPACE,          # the same SearchSpace the optimizer takes
+            train,          # the same objective, returning a mapping
+            "cpu",          # the queue this task's evaluations go to
+            64,             # points; floored to a power of two
+            SEED,           # optional, drawn and printed if omitted
+            extra_objective_kwargs={"epochs": 20},
+        ),
+        ExplorationTask("fine", NARROW_SPACE, train, "cpu", 256, SEED),
+    ],
+    executor,
+    64,                     # the count for any task that did not give one
+)
+
+sweep.run_exploration_jobs()
+
+params, value = sweep.best_point("coarse")
+print(params, sweep.best_output("coarse"))
+```
+
+Every task is submitted before any of them is waited for,
+so the whole sweep fills the pool at once
+rather than a 64 point task holding it while a 256 point task waits.
+Tasks may name different queues and are still submitted together.
+
+| Member | What it is |
+| --- | --- |
+| `tasks` | The tasks as they will run, with the point count and seed filled in. The caller's own `ExplorationTask` objects are left alone. |
+| `design(name)` | The points one task will evaluate, drawn but not submitted. Reproducible from the seed, so it also answers "what would this run do?" |
+| `run_exploration_jobs()` | Submit every task's design, block until it is all back, print the best of each. |
+| `best_point(name)` / `best_output(name)` | One task's lowest-valued point, and the objective's whole result there. |
+| `results[name]` | That task's `points`, `values`, `outputs` and `unit_points`, in submission order. |
+| `dim(name)` | Dimensionality of that task's space. |
+| `save(path)` | Write every task's `points`, `values` and `outputs` to a gzipped pickle. |
+
+The conventions are the optimizer's, per task:
+the objective returns a mapping with its value under `objective_key`
+(`"objective"` by default) and lower is better,
+a non-finite or non-numeric value is an error rather than a bad point,
+and one failed evaluation does not hide the rest of the sweep —
+every point of every task is waited for before anything raises,
+and the exception then names which tasks failed.
+
+The point count is floored to a power of two,
+because that is the prefix length at which a Sobol' sequence is balanced.
+64 workers asking for 100 points would evaluate 64 and leave the rest idle,
+so size the sweep in powers of two on purpose.
+
+`save()` is for keeping the results past the end of the driver process:
+
+```python
+sweep.save("sweep-results.pkl.gz")
+```
+
+```python
+import gzip, pickle
+
+with gzip.open("sweep-results.pkl.gz", "rb") as fobj:
+    results = pickle.load(fobj)
+
+results["coarse"]["points"]    # the parameters of each evaluation
+results["coarse"]["values"]    # the ranked value of each
+results["coarse"]["outputs"]   # the objective's whole result for each
+```
+
+The file is keyed by task name,
+and each task's three lists are index-aligned and in submission order.
+It is plain `pickle`, not `cloudpickle`:
+these are measurements rather than code,
+so anything an objective returns
+that a plain unpickler cannot rebuild does not belong in the file.
+
+Calling `run_exploration_jobs()` twice re-evaluates the same designs:
+the seed decides the draw, so there is no "next 64 points".
+Pass a different seed for fresh ground.

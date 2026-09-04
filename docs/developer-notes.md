@@ -66,11 +66,13 @@ See `.cpush.json5` for the `rivanna` and `ivy-hip-tricr-2` remotes.
 | `slurm_pilot_executor.py` | `SlurmPilotExecutor` (the coordinator, on the login node) and `WorkerGroup` |
 | `slurm_pilot_worker.py` | `PilotWorkerProcess` (runs inside Slurm jobs) and the `slurm-pilot-worker` CLI |
 | `slurm_utils.py` | `sbatch` / `squeue` / `scancel` wrappers, `get_clean_environ()` |
-| `bayes_opt_botorch.py` | `BayesOptBotorch` and the `ParameterRange` types |
+| `optimize_space_botorch.py` | `OptimizationTask` and `OptimizeSpaceBotorch`, the botorch searches |
+| `search_space.py` | `SearchSpace`, the `ParameterRange` types, and the unit cube mapping |
+| `explore_space.py` | `ExplorationTask` and `ExploreSpaceSobolQMC`, Sobol' sweeps with no model behind them |
 | `monitors.py` | Host and cgroup sampling, and the threads that publish it |
 | `swtop.py` | The `swtop` monitor: `Collector`, `render` and the CLI |
 | `templates/` | Jinja templates and their loader |
-| `utils.py` | `RemoteExecutionError`, id and logging helpers |
+| `utils.py` | `RemoteExecutionError`, id and logging helpers, `floor_power_of_two`, the progress-line formatters |
 
 The coordinator and the workers never talk to each other directly,
 only through the `ds-service` server,
@@ -94,6 +96,38 @@ with every still-pending id in one batched call.
 **Status and output are separate RPCs.**
 `task_get_status` returns only states,
 so each finished task then needs its own `task_get_output`.
+
+**A task that can never run is dropped; the batch is not.**
+`_starved_tasks` and `_stranded_tasks` return the subset they object to,
+rather than raising, because the answer is always a subset:
+a queue nobody scaled says nothing about the queues that were,
+and one group's jobs reaching their walltime
+says nothing about a task on another group's queue.
+Abandoning the rest of `pending` loses results the server already has,
+silently under `RAISE_NEVER`,
+and breaks what `RAISE_AFTER_COMPLETED` promises.
+The failure count in the deferred exception counts *tasks* for the same
+reason: one message covers every task on a dead queue.
+
+**What came back is recorded even when the batch failed.**
+Both drivers wait with `RAISE_AFTER_COMPLETED` and then record;
+on the failure path they record what returned before re-raising.
+A sweep of a few thousand points must not lose all of them to one,
+and `save()` is what the next run reads.
+
+**Every failure is warned about, whatever `RaiseOnError` says.**
+The warning is the part a caller cannot switch off,
+because `RAISE_NEVER` otherwise loses a failure entirely:
+`task.output` is the only other record, and nothing forces a caller to read it.
+It goes to stderr through `tqdm.write`,
+so it neither breaks the progress bar nor lands in a caller's stdout.
+
+**Only `wait` can defer.**
+`as_completed` yields results as they arrive,
+so there is no point at which it has finished but the caller has not,
+and `RAISE_AFTER_COMPLETED` collapses to `RAISE_ON_FIRST_ERROR` there.
+`wait` therefore drives `_as_completed` itself
+rather than going through `as_completed`, which would rewrite the policy.
 
 **The poll loop must name every `TaskState` explicitly.**
 Its `else` branch means "keep waiting",
@@ -213,12 +247,97 @@ so a body cannot contain a whitespace-trimming Jinja comment:
 the parser reads it as the header of the next template.
 Use `{#` without the dash inside a body.
 
-### Batch Bayesian optimization (`bayes_opt_botorch.py`)
+### Search spaces (`search_space.py`)
 
-- **The model is fit to `-f`**, and `best_f` is `max(-v)`,
-  the same negated space.
-  botorch maximizes and this minimizes.
-  Get it backwards and the search quietly walks uphill instead of failing.
+**Nothing here may import torch or botorch.**
+That is the whole point of the split:
+a search space is arithmetic on one value at a time,
+so it can be built and tested where the optimizer cannot be installed,
+and `tests/test_search_space.py` runs without the `importorskip`
+that skips every botorch test.
+`optimize_space_botorch` imports only what it uses of it
+and re-exports nothing:
+`search_space` is the one place a range is imported from.
+
+**`to_unit` and `to_params` agree by the order of the space.**
+A `SearchSpace` is an ordered mapping in practice,
+and a unit point is a bare list of coordinates,
+so the column order is the mapping's own iteration order.
+Two spaces holding the same ranges in a different order
+are different spaces to a model fit on one of them.
+
+### Sobol' exploration (`explore_space.py`)
+
+**scipy's Sobol', not botorch's.**
+`ExploreSpaceSobolQMC` draws with `scipy.stats.qmc.Sobol`,
+so a sweep needs neither torch nor botorch,
+and `tests/test_explore_space.py` runs without them.
+`rng=` is the seed argument (`seed=` is the older spelling),
+which is what the `scipy>=1.15` floor in `pyproject.toml` is for.
+
+**The count is floored to a power of two, and drawn with `random_base2`.**
+A Sobol' sequence is only balanced on a power-of-two prefix,
+and scipy says so with a warning if asked for anything else.
+Since the count is floored anyway,
+asking in scipy's own terms is the same draw without the warning.
+
+**Every task is submitted before any of them is waited for.**
+That is what "simultaneously" means here:
+one `submit` loop over every task's design, then a single `wait`.
+Submitting and waiting per task would leave the pool idle
+whenever a small sweep finished ahead of a large one,
+and would serialize tasks that name different queues
+even though nothing makes them wait for each other.
+
+**A task is validated when the sweep is built, not when it runs.**
+An empty space, a shadowed parameter or a missing point count
+is reported before anything reaches the cluster.
+`_resolve` returns a copy with the point count and seed filled in,
+so `self.tasks` says what will actually run
+and the caller's own dataclass is left as they wrote it.
+
+**It shares the shape of `OptimizeSpaceBotorch`, not its code.**
+Submitting a batch, waiting with `RAISE_AFTER_COMPLETED`,
+recording what came back and reporting the best
+are written out in both classes.
+The fiddliest part of it is not:
+`utils.objective_value` is the one place an objective's result is checked,
+so the four rejection messages cannot drift apart.
+The rest still can. A fix to one class belongs in the other.
+
+**The results file format is owned by `explore_space`.**
+`load_results` reads what both `save` methods write,
+and `SavedResults` says what a file holds.
+The optimizer imports the reader rather than reimplementing it,
+which is what keeps "the shape the explorer writes" true.
+`unit_points` is deliberately not in the file:
+only the space can place a point in the unit cube,
+and a stored copy could have been written against a different space.
+
+### Batch Bayesian optimization (`optimize_space_botorch.py`)
+
+**It never explores.**
+An `OptimizeSpaceBotorch` is constructed from results files
+and fails if a task has no observations in them.
+That is what makes a search resumable:
+the state that has to survive a walltime limit is a file,
+not an object, and `save` writes only what its own run measured
+so the files concatenate without double counting.
+
+**A round is two batches, not two per task.**
+Every active task's fit is submitted before any is waited for,
+then every active task's proposed points.
+Tasks therefore advance in step and drop out independently,
+each against its own `patience`, floor and ceiling.
+
+- **The model is fit to `-f`.**
+  botorch maximizes and this minimizes,
+  so every acquisition value is in that negated space too.
+  `qLogNoisyExpectedImprovement` takes no `best_f`:
+  it reads its incumbent off the posterior at `X_baseline`,
+  which is the same negated space again.
+  Get the sign backwards and the search quietly walks uphill
+  instead of failing.
 - **`unit_points` holds the point actually evaluated**,
   re-standardized *after* rounding, never the continuous proposal.
   Otherwise the GP is told about a location the objective never ran at.
@@ -231,14 +350,14 @@ Use `{#` without the dash inside a body.
   so cloudpickle sends it by reference
   and no torch object has to survive a hop between hosts.
   Its workers need botorch; `objective_queue`'s do not.
-- **The four acquisition knobs belong to the run, not to the process.**
+- **The four acquisition knobs belong to the task, not to the process.**
   `num_restarts`, `raw_samples`, `mc_samples` and `acqf_timeout_s`
-  are `__init__` arguments with literal defaults,
-  kept on the instance and passed to every `fit_and_propose` task.
+  are `OptimizationTask` fields with literal defaults,
+  passed to every `fit_and_propose` task.
   A value read inside `fit_and_propose` would be the *worker's*,
-  ignoring how the run was configured.
+  ignoring how the search was configured.
   Tests assert them by constructing with them
-  (`make_opt(acqf_timeout_s=...)`) or against `opt.<knob>`,
+  (`make_task(acqf_timeout_s=...)`) or against `opt.tasks[i].<knob>`,
   never against a literal.
 - **The stall counter runs from round 1;
   `min_search_iterations` gates the stop, not the counting.**
@@ -372,7 +491,7 @@ would otherwise turn a successful submission into a parse failure.
 
   If `pyright` objects to a deliberate test double,
   say so with a `cast` and a comment explaining why the double is sufficient
-  (see `as_executor` in `tests/test_bayes_opt_botorch.py`)
+  (see `as_executor` in `tests/test_optimize_space_botorch.py`)
   rather than silencing it with a bare `# type: ignore`.
   If it objects to something in `src/`, prefer fixing the annotation.
   The `SearchSpace = Mapping[...]` alias exists because `dict[...]`

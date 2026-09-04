@@ -20,6 +20,7 @@ from ds_service_client import TaskState
 
 import support_actor
 from slurm_workflows import slurm_pilot_worker as worker_mod
+from slurm_workflows.slurm_pilot_executor import RaiseOnError
 from slurm_workflows.slurm_pilot_worker import slurm_pilot_worker
 from slurm_workflows.utils import RemoteExecutionError
 from worker_harness import make_worker, poll_worker, run_worker
@@ -142,7 +143,7 @@ class TestRemoteErrors:
         run_worker(worker, expect_tasks=1)  # must not raise
         worker.close()
 
-        executor.wait([task])
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
         assert isinstance(task.output, RemoteExecutionError)
         assert task.output.error == "task blew up"
         assert task.output.error_id.startswith("ERROR_")
@@ -158,7 +159,7 @@ class TestRemoteErrors:
         run_worker(worker, expect_tasks=2)
         worker.close()
 
-        executor.wait([bad, good])
+        executor.wait([bad, good], raise_on_error=RaiseOnError.RAISE_NEVER)
         assert isinstance(bad.output, RemoteExecutionError)
         assert good.output == 16
 
@@ -172,7 +173,7 @@ class TestRemoteErrors:
             run_worker(worker, expect_tasks=1)
             worker.close()
 
-        executor.wait([task])
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
         error_id = task.output.error_id
         assert error_id in caplog.text
         assert "ValueError: task blew up" in caplog.text
@@ -187,7 +188,7 @@ class TestRemoteErrors:
         run_worker(worker, expect_tasks=1)
         worker.close()
 
-        executor.wait([task])
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
         assert isinstance(task.output, RemoteExecutionError)
 
 
@@ -324,7 +325,7 @@ class TestActors:
         run_worker(worker, expect_tasks=1)
         worker.close()
 
-        executor.wait([task])
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
         assert isinstance(task.output, RemoteExecutionError)
         assert task.output.error == "actor failure"
 
@@ -337,7 +338,7 @@ class TestActors:
         run_worker(worker, expect_tasks=1)
         worker.close()
 
-        executor.wait([task])
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
         assert isinstance(task.output, RemoteExecutionError)
 
     def test_close_calls_actor_close(self, ds_service_address, tmp_path):

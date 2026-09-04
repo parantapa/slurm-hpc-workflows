@@ -36,7 +36,7 @@ so the partial sums simply add up.
 """
 
 from ds_service_client import DsServiceServer
-from slurm_workflows import SlurmPilotExecutor, check_for_error
+from slurm_workflows import SlurmPilotExecutor
 
 # Shell run inside each job before the worker starts.
 # Nothing is inherited from the login node,
@@ -162,17 +162,21 @@ def main():
             # Blocks until every task is executed.
             # Use `as_completed(tasks)` instead
             # if you want to consume results as they land.
-            executor.wait(tasks)
-
+            #
             # An exception on a worker does not reach the driver:
-            # it comes back as this task's *output*.
-            # So always check, or the sum below would fail
+            # it comes back as that task's *output*.
+            # `wait` raises on the first one it sees,
+            # which is what keeps the sum below from failing
             # with something unrelated-looking.
-            # `error_id` appears next to the traceback in the worker's log,
+            # The warning it prints carries an `error_id`
+            # that appears next to the traceback in the worker's log,
             # under `executor.work_dir`.
-            failed = check_for_error(tasks)
-            if failed:
-                raise RuntimeError(f"{len(failed)} of {len(tasks)} tasks failed")
+            #
+            # `from slurm_workflows import RaiseOnError` and pass
+            # `raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED`
+            # to see every failure of the batch rather than the first,
+            # or `RaiseOnError.RAISE_NEVER` to handle them yourself.
+            executor.wait(tasks)
 
     # Outside both blocks: the pool is cancelled and the queue is gone,
     # but the results were copied into the Task objects by `wait`,

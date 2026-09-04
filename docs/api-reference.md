@@ -3,9 +3,9 @@
 [← back to the how-to guide](howto-use-slurm-workflows.md)
 
 Import from the package root:
-`from slurm_workflows import SlurmPilotExecutor, check_for_error`.
+`from slurm_workflows import SlurmPilotExecutor, RaiseOnError, RemoteExecutionError`.
 (The botorch optimizer is the exception:
-it lives in `slurm_workflows.bayes_opt_botorch`,
+it lives in `slurm_workflows.optimize_space_botorch`,
 so that the package keeps working without botorch installed.)
 
 ## `SlurmPilotExecutor(name, server_address, work_dir=None)`
@@ -32,8 +32,8 @@ generated scripts and all logs land there.
 | `define_worker(name, sbatch_args, ...)` | Register a worker group. Idempotent — redefining a group identically is a no-op, redefining it differently asserts. |
 | `scale_workers(name, count)` | Submit or cancel pilot jobs so the group has `count` jobs. |
 | `submit(queue, fn, *args, **kwargs) -> Task` | Enqueue a task. `queue` is a group name or a list of them; `fn` is a callable, or a method name (`str`) for actor workers. |
-| `as_completed(tasks, desc=None, unit="task")` | Yield tasks as their results arrive, wrapped in a tqdm bar. Raises `RuntimeError` rather than blocking forever on a task that can never finish — see below. |
-| `wait(tasks, desc=None, unit="task")` | Same, but discards the iterator — just block until all are done. |
+| `as_completed(tasks, desc=None, unit="task", raise_on_error=...)` | Yield tasks as their results arrive, wrapped in a tqdm bar. Raises `RuntimeError` rather than blocking forever on a task that can never finish — see below. |
+| `wait(tasks, desc=None, unit="task", raise_on_error=...)` | Same, but discards the iterator — just block until all are done. |
 | `set_task_name(task, name)` | Name a task, on the queue server as well as locally. |
 | `num_groups()` / `num_workers(detail=False)` | Counts of defined groups and submitted workers; `detail=True` returns a per-group dict. |
 | `stop()` | Cancel all pilot jobs, keep the executor usable. |
@@ -152,10 +152,49 @@ It is recorded on the `Task` for inspection;
 changing it there has no effect,
 since the value the server orders by was sent when the task was enqueued.
 
-## `check_for_error(tasks, verbose=True)`
+## `RaiseOnError`
 
-Returns the subset of `tasks` whose `output` is a `RemoteExecutionError`,
-printing each one's `error` and `error_id` unless `verbose=False`.
+What `as_completed` and `wait` do about a task that fails.
+A failure is any of: a task whose worker raised
+(its `output` is a `RemoteExecutionError`),
+a task canceled on the queue server,
+a task the server does not know,
+or a pending task whose queues have no pilot job left to run them.
+Only the tasks that cannot finish are given up on;
+the rest of the batch is still waited for.
+
+| Value | Effect |
+| --- | --- |
+| `RAISE_ON_FIRST_ERROR` | The default. Stop at the first failure and raise `RuntimeError`. |
+| `RAISE_AFTER_COMPLETED` | Wait for every task that can still finish, then raise once for all the failures together. `as_completed` treats this as `RAISE_ON_FIRST_ERROR`. |
+| `RAISE_NEVER` | Report and return. |
+
+**Every failure is warned about on stderr as it is met**, whichever value
+is used; the value decides only whether an exception follows.
+The warning carries the task id and, for a worker that raised, the
+`error_id` that appears beside the traceback in that worker's log.
+
+`as_completed` hands out results one at a time,
+so there is no point at which it could still be feeding the caller
+*and* have finished — which is why `RAISE_AFTER_COMPLETED` collapses to
+`RAISE_ON_FIRST_ERROR` there.
+Use it with `wait`, where one failed evaluation of a batch
+should not hide the other 39.
+
+With `RAISE_NEVER` the caller reads the outcome off the tasks:
+
+```python
+from slurm_workflows import RaiseOnError, RemoteExecutionError
+from slurm_workflows.slurm_pilot_executor import NoOutput
+
+executor.wait(tasks, raise_on_error=RaiseOnError.RAISE_NEVER)
+
+failed = [t for t in tasks if isinstance(t.output, RemoteExecutionError)]
+never_ran = [t for t in tasks if t.output is NoOutput]
+```
+
+`output` stays `NoOutput` for a task that was canceled, is unknown to the
+server, or was still pending when the last pilot job went away.
 
 ## Worker environment
 
@@ -219,7 +258,8 @@ Two details worth knowing:
  does not propagate to the coordinator.
  The worker catches it, logs the traceback under a generated `error_id`,
  and returns a `RemoteExecutionError` as the task's `output`.
- Always run `check_for_error` over a completed batch.
+ `as_completed` and `wait` are what turn that back into an exception,
+ under the [`RaiseOnError`](#raiseonerror) policy they are given.
 - **Submitting from inside a job works.** `sbatch` is invoked
     with all `SLURM_*` / `SLURMD_*` / `PMI_*` / `SRUN_*` variables
     stripped from the environment,

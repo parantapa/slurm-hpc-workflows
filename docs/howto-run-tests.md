@@ -10,14 +10,14 @@ pytest
 ```
 
 The suite needs no Slurm cluster.
-It takes about 50s end to end:
-~24s for everything but the botorch tests,
+It takes about 55s end to end:
+~26s for everything but the botorch tests,
 and the rest is GP fits.
-Most of that first 24s is one ds-service process started per test,
+Most of that first 26s is one ds-service process started per test,
 which is the price of testing against the real queue.
 
 The `[test]` extra pulls botorch, and so torch — a large download.
-Without it `test_bayes_opt_botorch.py` skips
+Without it `test_optimize_space_botorch.py` skips
 and the rest of the suite still runs.
 `[dev]` adds `black` and `pyright`,
 which the repository conventions require to be clean
@@ -61,7 +61,10 @@ Paths are relative to [`tests/`](../tests).
 | `test_worker.py` | `PilotWorkerProcess` and the `slurm-pilot-worker` CLI |
 | `test_monitors.py` | The host and cgroup samplers and the monitor threads |
 | `test_swtop.py` | The `swtop` monitor: what it collects, how it renders, and the CLI |
-| `test_bayes_opt_botorch.py` | `BayesOptBotorch`: ranges, budgets, acquisition, search behaviour (skips without botorch) |
+| `test_search_space.py` | The range types and the unit cube mapping (no botorch needed) |
+| `test_explore_space.py` | `ExploreSpaceSobolQMC`: the design it draws and what it records (no botorch needed) |
+| `test_utils.py` | The shared helpers |
+| `test_optimize_space_botorch.py` | `OptimizeSpaceBotorch`: the observations it starts from, rounds, acquisition, search behaviour, resuming (skips without botorch) |
 | `conftest.py` | Fixtures: real ds-service, fake Slurm, executor, hang guards |
 | `worker_harness.py` | Runs a real worker's main loop for a bounded number of tasks, or of queue polls |
 | `support_actor.py` | Actor classes; must stay importable by name for actor tests |

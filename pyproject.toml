@@ -26,6 +26,9 @@ dependencies = [
     "cloudpickle",
     "typeguard>=3",
     "psutil",
+    "numpy",
+    # 1.15 is where `qmc.Sobol` took `rng=`, the seed argument used here.
+    "scipy>=1.15",
     "ds-service-client>=4.0.0"
 ]
 

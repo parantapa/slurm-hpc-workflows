@@ -43,7 +43,7 @@ pip install -U slurm-workflows
 | [How to use slurm-workflows](docs/howto-use-slurm-workflows.md) | The user guide: concepts, quick start, stateful actors, one worker per job vs per task, running the task-queue server, and troubleshooting. |
 | [Developer notes](docs/developer-notes.md) | Working on `slurm-workflows` itself: where the code lives, the invariants that are quiet when broken, and the conventions a change is checked against. |
 | [Batch Bayesian optimization with botorch](docs/bayesian-optimization-using-botorch.md) | The batch Bayesian optimizer that proposes a whole batch of points per round, over mixed integer / float / log-float / categorical spaces. |
-| [API reference](docs/api-reference.md) | `SlurmPilotExecutor`, `Task`, `check_for_error`, and the worker environment. |
+| [API reference](docs/api-reference.md) | `SlurmPilotExecutor`, `Task`, `RaiseOnError`, and the worker environment. |
 | [How to run the tests](docs/howto-run-tests.md) | Running the suite, what is mocked and what is real, and notes for changing the tests. |
 
 ## License

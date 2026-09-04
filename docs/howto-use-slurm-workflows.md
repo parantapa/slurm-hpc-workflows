@@ -29,7 +29,7 @@ So `submit("gpu", ...)` is served by workers from the group named `gpu`.
 ## Quick start
 
 ```python
-from slurm_workflows import SlurmPilotExecutor, check_for_error
+from slurm_workflows import SlurmPilotExecutor
 
 def square(x):
     return x * x
@@ -58,12 +58,11 @@ executor.scale_workers("cpu", 4)
 tasks = [executor.submit("cpu", square, i) for i in range(100)]
 
 # 4. Collect results as they complete (tqdm progress bar included).
+# A task that raised on its worker stops this with a RuntimeError,
+# after a warning naming the task and its error_id;
+# `raise_on_error` chooses otherwise.
 for task in executor.as_completed(tasks, desc="squaring"):
     ...  # task.output holds the return value
-
-# Surface any tasks that raised on the worker.
-for task in check_for_error(tasks):
-    print(task.task_id, task.output.error_id)
 
 # 5. Cancel all pilot jobs when done.
 executor.close()

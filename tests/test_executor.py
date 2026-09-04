@@ -19,10 +19,10 @@ import pytest
 import cloudpickle
 from typeguard import TypeCheckError
 
-from slurm_workflows import check_for_error
 from slurm_workflows import slurm_pilot_executor as spe
 from slurm_workflows.slurm_pilot_executor import (
     NoOutput,
+    RaiseOnError,
     SlurmPilotExecutor,
     Task,
 )
@@ -691,43 +691,122 @@ class TestRemoteErrors:
     def _pilot_jobs(self, pilot_jobs):
         pilot_jobs("cpu")
 
-    def test_worker_exception_is_returned_not_raised(self, executor, ds_client):
+    def test_a_worker_exception_comes_back_as_the_output(self, executor, ds_client):
+        """It never propagates out of the worker; the policy decides the rest."""
         task = executor.submit("cpu", square, 1)
         fail_one(ds_client, "cpu", error_id="ERROR_abc")
 
-        executor.wait([task])  # must not raise
+        executor.wait([task], raise_on_error=RaiseOnError.RAISE_NEVER)
 
         assert isinstance(task.output, RemoteExecutionError)
         assert task.output.error_id == "ERROR_abc"
 
-    def test_check_for_error_finds_failed_tasks(self, executor, ds_client):
+    def test_a_failure_raises_by_default(self, executor, ds_client):
+        task = executor.submit("cpu", square, 1)
+        fail_one(ds_client, "cpu", error_id="ERROR_xyz")
+
+        with pytest.raises(RuntimeError, match="ERROR_xyz"):
+            executor.wait([task])
+
+    def test_the_first_failure_stops_the_wait(self, executor, ds_client):
+        tasks = [executor.submit("cpu", square, i) for i in range(3)]
+        fail_one(ds_client, "cpu")
+
+        with pytest.raises(RuntimeError):
+            executor.wait(tasks)
+
+        # The other two were never waited for.
+        assert [t.output is NoOutput for t in tasks] == [False, True, True]
+
+    def test_raise_never_returns_the_failure_as_a_result(self, executor, ds_client):
         tasks = [executor.submit("cpu", square, i) for i in range(3)]
         fail_one(ds_client, "cpu")
         drain(ds_client, "cpu", 2)
-        executor.wait(tasks)
 
-        failed = check_for_error(tasks, verbose=False)
+        executor.wait(tasks, raise_on_error=RaiseOnError.RAISE_NEVER)
 
+        failed = [t for t in tasks if isinstance(t.output, RemoteExecutionError)]
         assert len(failed) == 1
-        assert isinstance(failed[0].output, RemoteExecutionError)
+        assert all(t.output is not NoOutput for t in tasks)
 
-    def test_check_for_error_returns_empty_when_all_succeed(self, executor, ds_client):
+    def test_raise_after_completed_waits_for_the_rest_first(self, executor, ds_client):
         tasks = [executor.submit("cpu", square, i) for i in range(3)]
-        drain(ds_client, "cpu", 3)
-        executor.wait(tasks)
+        fail_one(ds_client, "cpu")
+        drain(ds_client, "cpu", 2)
 
-        assert check_for_error(tasks, verbose=False) == []
+        with pytest.raises(RuntimeError, match="1 of 3 tasks did not succeed"):
+            executor.wait(tasks, raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED)
 
-    def test_check_for_error_prints_when_verbose(self, executor, ds_client, capsys):
+        assert all(t.output is not NoOutput for t in tasks)
+
+    def test_a_deferred_exception_names_every_failure(self, executor, ds_client):
+        tasks = [executor.submit("cpu", square, i) for i in range(2)]
+        fail_one(ds_client, "cpu", error_id="ERROR_one")
+        fail_one(ds_client, "cpu", error_id="ERROR_two")
+
+        with pytest.raises(RuntimeError) as raised:
+            executor.wait(tasks, raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED)
+
+        assert "ERROR_one" in str(raised.value)
+        assert "ERROR_two" in str(raised.value)
+
+    def test_a_long_list_of_failures_is_summarized(self, executor, ds_client):
+        tasks = [executor.submit("cpu", square, i) for i in range(7)]
+        for _ in range(7):
+            fail_one(ds_client, "cpu")
+
+        with pytest.raises(RuntimeError, match="and 2 more"):
+            executor.wait(tasks, raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            RaiseOnError.RAISE_ON_FIRST_ERROR,
+            RaiseOnError.RAISE_AFTER_COMPLETED,
+            RaiseOnError.RAISE_NEVER,
+        ],
+    )
+    def test_every_failure_is_warned_about_whatever_the_policy(
+        self, executor, ds_client, capsys, policy
+    ):
         task = executor.submit("cpu", square, 1)
         fail_one(ds_client, "cpu", error_id="ERROR_xyz")
-        executor.wait([task])
 
-        check_for_error([task], verbose=True)
+        try:
+            executor.wait([task], raise_on_error=policy)
+        except RuntimeError:
+            pass
 
-        out = capsys.readouterr().out
-        assert "ERROR_xyz" in out
-        assert task.task_id in out
+        err = capsys.readouterr().err
+        assert "ERROR_xyz" in err
+        assert task.task_id in err
+
+    def test_as_completed_cannot_defer_and_says_so_by_raising(
+        self, executor, ds_client
+    ):
+        """There is no "after" once results are being handed out."""
+        tasks = [executor.submit("cpu", square, i) for i in range(3)]
+        fail_one(ds_client, "cpu")
+        drain(ds_client, "cpu", 2)
+
+        with pytest.raises(RuntimeError):
+            list(
+                executor.as_completed(
+                    tasks, raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED
+                )
+            )
+
+    def test_as_completed_yields_failures_when_never_raising(self, executor, ds_client):
+        tasks = [executor.submit("cpu", square, i) for i in range(3)]
+        fail_one(ds_client, "cpu")
+        drain(ds_client, "cpu", 2)
+
+        seen = list(
+            executor.as_completed(tasks, raise_on_error=RaiseOnError.RAISE_NEVER)
+        )
+
+        assert len(seen) == 3
+        assert sum(isinstance(t.output, RemoteExecutionError) for t in seen) == 1
 
 
 # --------------------------------------------------------------------------
@@ -856,6 +935,53 @@ class TestNoWorkerStarted:
 
         assert yielded == [], "the error must come before any result"
 
+    def test_only_the_starved_tasks_are_given_up_on(
+        self, executor, ds_client, setup_script
+    ):
+        """A queue nobody scaled says nothing about the queues that were."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        good = [executor.submit("cpu", square, i) for i in range(3)]
+        starved = executor.submit("ghost", square, 9)
+        drain(ds_client, "cpu", 3)
+
+        executor.wait(good + [starved], raise_on_error=RaiseOnError.RAISE_NEVER)
+
+        assert [task.output for task in good] == [0, 1, 4]
+        assert starved.output is NoOutput
+
+    def test_the_rest_of_the_batch_is_waited_for_before_raising(
+        self, executor, ds_client, setup_script
+    ):
+        """What RAISE_AFTER_COMPLETED promises: everything that can finish."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        good = [executor.submit("cpu", square, i) for i in range(3)]
+        starved = executor.submit("ghost", square, 9)
+        drain(ds_client, "cpu", 3)
+
+        with pytest.raises(RuntimeError, match="1 of 4 tasks did not succeed"):
+            executor.wait(
+                good + [starved], raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED
+            )
+
+        assert all(task.output is not NoOutput for task in good)
+
+    def test_the_count_is_of_tasks_not_of_messages(
+        self, executor, ds_client, setup_script
+    ):
+        """One message covers every task on a dead queue."""
+        executor.define_worker("cpu", [], setup_script)
+        executor.scale_workers("cpu", 1)
+        done = executor.submit("cpu", square, 1)
+        starved = [executor.submit("ghost", square, i) for i in range(3)]
+        drain(ds_client, "cpu", 1)
+
+        with pytest.raises(RuntimeError, match="3 of 4 tasks did not succeed"):
+            executor.wait(
+                [done] + starved, raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED
+            )
+
     def test_one_live_queue_is_enough(self, executor, ds_client, setup_script):
         """A task submitted to several queues needs a worker on only one."""
         executor.define_worker("cpu", [], setup_script)
@@ -952,6 +1078,54 @@ class TestStrandedTasks:
         with time_limit(10, "wait did not notice the dead queue"):
             with pytest.raises(RuntimeError, match="no live pilot job"):
                 executor.wait([task])
+
+    def test_only_the_stranded_tasks_are_given_up_on(
+        self, executor, fake_slurm, setup_script, ds_client, check_immediately
+    ):
+        """One group reaching its walltime must not discard another's work.
+
+        The shape of a real run: a one-job `opt` pool dies
+        while the `eval` pool is still working through its round.
+        """
+        executor.define_worker("eval", [], setup_script)
+        executor.define_worker("opt", [], setup_script)
+        executor.scale_workers("eval", 1)
+        executor.scale_workers("opt", 1)
+        opt_job = fake_slurm.submissions[-1].job_id
+
+        working = [executor.submit("eval", square, i) for i in range(3)]
+        stranded = executor.submit("opt", square, 9)
+
+        fake_slurm.running_job_ids.remove(opt_job)
+        drain(ds_client, "eval", 3)
+
+        executor.wait(working + [stranded], raise_on_error=RaiseOnError.RAISE_NEVER)
+
+        assert [task.output for task in working] == [0, 1, 4]
+        assert stranded.output is NoOutput
+
+    def test_the_stranded_count_is_of_tasks(
+        self, executor, fake_slurm, setup_script, ds_client, check_immediately
+    ):
+        executor.define_worker("eval", [], setup_script)
+        executor.define_worker("opt", [], setup_script)
+        executor.scale_workers("eval", 1)
+        executor.scale_workers("opt", 1)
+        opt_job = fake_slurm.submissions[-1].job_id
+
+        working = executor.submit("eval", square, 1)
+        stranded = [executor.submit("opt", square, i) for i in range(2)]
+
+        fake_slurm.running_job_ids.remove(opt_job)
+        drain(ds_client, "eval", 1)
+
+        with pytest.raises(RuntimeError, match="2 of 3 tasks did not succeed"):
+            executor.wait(
+                [working] + stranded,
+                raise_on_error=RaiseOnError.RAISE_AFTER_COMPLETED,
+            )
+
+        assert working.output == 1
 
     def test_already_finished_tasks_are_not_checked(
         self, executor, fake_slurm, setup_script, ds_client, check_immediately

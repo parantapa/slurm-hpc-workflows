@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 import json
 import pickle
 import logging
 import subprocess
+from enum import Enum, auto
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -35,6 +37,35 @@ from .utils import (
 from .templates import render_template
 
 NoOutput = object()
+
+
+class RaiseOnError(Enum):
+    """What `as_completed` and `wait` do about a task that fails.
+
+    A failure is a task whose worker raised, one canceled on the queue
+    server, one the server does not know, or a pending task whose queues
+    have no pilot job left to run them.
+    Every one of them is warned about as it is met, whichever of these
+    is chosen; this decides only whether an exception follows.
+    """
+
+    # Stop at the first failure.
+    RAISE_ON_FIRST_ERROR = auto()
+
+    # Wait for every task that can still finish, then raise for all of them
+    # at once. `as_completed` cannot honour this -- it hands out results as
+    # they arrive, so there is no "after" to defer to -- and treats it as
+    # RAISE_ON_FIRST_ERROR.
+    RAISE_AFTER_COMPLETED = auto()
+
+    # Report the failures and return. The caller reads `task.output`,
+    # which holds a `RemoteExecutionError` where a worker raised
+    # and stays `NoOutput` for a task that never ran.
+    RAISE_NEVER = auto()
+
+
+# How many failures a deferred exception names before it stops listing them.
+MAX_REPORTED_ERRORS = 5
 
 # What an executor may be called.
 # The name ends up in task ids, a logger name, a directory name
@@ -360,7 +391,17 @@ class SlurmPilotExecutor:
 
         return self._submit(queue, fn, *args, **kwargs)
 
-    def _as_completed(self, tasks: list[Task]) -> Iterable[Task]:
+    def _warn(self, message: str) -> None:
+        """Report one failure as it happens, whatever the raise policy is.
+
+        Through tqdm, so it does not cut across a progress bar,
+        and on stderr, so it does not land in a caller's results.
+        """
+        tqdm.write(f"warning: {message}", file=sys.stderr)
+
+    def _as_completed(
+        self, tasks: list[Task], raise_on_error: RaiseOnError
+    ) -> Iterable[Task]:
         pending: list[Task] = []
         finished: list[Task] = []
         for task in tasks:
@@ -369,10 +410,38 @@ class SlurmPilotExecutor:
             else:
                 finished.append(task)
 
+        # Every failure met on the way, in the order it was met.
+        # Only read when the exception is deferred;
+        # the other two policies have raised or returned by then.
+        errors: list[str] = []
+        # Tasks, not messages: one message can cover a whole queue's worth.
+        failures = 0
+
+        def failed(message: str, tasks: int = 1) -> None:
+            """Warn about a failure, and raise now if that is the policy."""
+            nonlocal failures
+            self._warn(message)
+            errors.append(message)
+            failures += tasks
+            if raise_on_error is RaiseOnError.RAISE_ON_FIRST_ERROR:
+                raise RuntimeError(message)
+
+        def drop(unrunnable: list[Task], message: str) -> list[Task]:
+            """Report tasks that can never finish, and stop waiting on them.
+
+            Only those: the rest of the batch is still on its way, and a
+            queue nobody scaled says nothing about the queues that were.
+            """
+            failed(message, len(unrunnable))
+            unrunnable_ids = {task.task_id for task in unrunnable}
+            return [task for task in pending if task.task_id not in unrunnable_ids]
+
         # Before anything is yielded, so a caller that never scaled a group
         # is told at once rather than after the first result.
         if pending:
-            self._raise_if_no_worker_started(pending)
+            starved, message = self._starved_tasks(pending)
+            if starved:
+                pending = drop(starved, message)
 
         yield from finished
 
@@ -396,46 +465,89 @@ class SlurmPilotExecutor:
                     output = self.client.task_get_output(task.task_id)
                     task.output = cloudpickle.loads(output)
                     completed += 1
+                    if isinstance(task.output, RemoteExecutionError):
+                        # The task finished; what it produced is the failure.
+                        # Reported here so that a caller who never looks at
+                        # `output` still hears about it.
+                        failed(
+                            f"Task {task.task_id} failed on its worker: "
+                            f"{task.output.error} "
+                            f"(error_id={task.output.error_id})"
+                        )
                     yield task
                 elif state == TaskState.Canceled:
                     # Nothing here cancels tasks,
                     # so this is somebody cancelling out of band.
                     # A canceled task is never dispatched again,
                     # so it has to be reported rather than waited on.
-                    raise RuntimeError(
+                    failed(
                         f"Task {task.task_id} was canceled on the task queue "
                         f"server, so it will never produce an output"
                     )
                 elif state == TaskState.Undefined:
-                    raise RuntimeError(
-                        f"Task {task.task_id} is unknown to the task queue server"
-                    )
+                    failed(f"Task {task.task_id} is unknown to the task queue server")
                 else:
                     next_pending.append(task)
 
             pending = next_pending
 
             if pending and time.monotonic() >= next_liveness_check:
-                self._raise_if_no_live_queue(pending)
+                stranded, message = self._stranded_tasks(pending)
+                if stranded:
+                    pending = drop(stranded, message)
                 next_liveness_check = time.monotonic() + LIVE_QUEUE_CHECK_INTERVAL_S
 
             if pending and not completed:
                 time.sleep(POLL_INTERVAL_S)
 
+        if errors and raise_on_error is RaiseOnError.RAISE_AFTER_COMPLETED:
+            raise RuntimeError(self._error_summary(errors, failures, len(tasks)))
+
+    @staticmethod
+    def _error_summary(errors: list[str], failures: int, num_tasks: int) -> str:
+        """One message for every failure of a wait, without printing a wall.
+
+        Each of them has already been warned about individually,
+        so the exception names a few and says how many there were.
+        The count is of tasks rather than of messages,
+        because one message can cover every task on a dead queue.
+        """
+        shown = "; ".join(errors[:MAX_REPORTED_ERRORS])
+        if len(errors) > MAX_REPORTED_ERRORS:
+            shown += f"; and {len(errors) - MAX_REPORTED_ERRORS} more"
+        return f"{failures} of {num_tasks} tasks did not succeed: {shown}"
+
     @typechecked
     def as_completed(
-        self, tasks: Iterable[Task], desc: str | None = None, unit: str = "task"
+        self,
+        tasks: Iterable[Task],
+        desc: str | None = None,
+        unit: str = "task",
+        raise_on_error: RaiseOnError = RaiseOnError.RAISE_ON_FIRST_ERROR,
     ) -> Iterable[Task]:
         tasks = list(tasks)
-        iterable = self._as_completed(tasks)
+        # Results are handed out one at a time here,
+        # so there is no point after which a deferred exception could be
+        # raised while the caller still has tasks to receive.
+        if raise_on_error is RaiseOnError.RAISE_AFTER_COMPLETED:
+            raise_on_error = RaiseOnError.RAISE_ON_FIRST_ERROR
+
+        iterable = self._as_completed(tasks, raise_on_error)
         iterable = tqdm(iterable, total=len(tasks), desc=desc, unit=unit)
         return iterable
 
     @typechecked
     def wait(
-        self, tasks: Iterable[Task], desc: str | None = None, unit: str = "task"
+        self,
+        tasks: Iterable[Task],
+        desc: str | None = None,
+        unit: str = "task",
+        raise_on_error: RaiseOnError = RaiseOnError.RAISE_ON_FIRST_ERROR,
     ) -> None:
-        for _ in self.as_completed(tasks, desc, unit):
+        tasks = list(tasks)
+        # Not through `as_completed`, which cannot defer an exception.
+        iterable = self._as_completed(tasks, raise_on_error)
+        for _ in tqdm(iterable, total=len(tasks), desc=desc, unit=unit):
             pass
 
     def num_groups(self):
@@ -484,13 +596,18 @@ class SlurmPilotExecutor:
             if any(worker.job_id in job_ids for worker in group.workers.values())
         }
 
-    def _raise_if_no_worker_started(self, pending: list[Task]) -> None:
-        """Fail at once on tasks no worker has ever been started for.
+    def _starved_tasks(self, pending: list[Task]) -> tuple[list[Task], str]:
+        """Pending tasks no worker has ever been started for, and why.
+
+        Returned rather than raised, because the answer is a *subset*:
+        the rest of the batch is on queues that were scaled
+        and is still on its way.
+        The caller decides what a task that can never run is worth.
 
         This reads local bookkeeping rather than asking the cluster:
         a queue is covered when `scale_workers` has submitted at least one job
         for the group of that name.
-        Whether those jobs are *still* alive is `_raise_if_no_live_queue`'s
+        Whether those jobs are *still* alive is `_stranded_tasks`'s
         question, asked periodically from then on.
 
         Checking here turns the two commonest mistakes
@@ -504,28 +621,33 @@ class SlurmPilotExecutor:
 
         starved = [task for task in pending if not set(task.queue) & started]
         if not starved:
-            return
+            return [], ""
 
         queues = sorted({q for task in starved for q in task.queue})
-        raise RuntimeError(
+        return starved, (
             f"{len(starved)} of {len(pending)} pending tasks are on queues with "
             f"no worker started: {queues}. "
             f"Call scale_workers() for a worker group of that name "
             f"before waiting on them."
         )
 
-    def _raise_if_no_live_queue(self, pending: list[Task]) -> None:
-        """Fail fast on pending tasks whose queues have no pilot job left.
+    def _stranded_tasks(self, pending: list[Task]) -> tuple[list[Task], str]:
+        """Pending tasks whose queues have no pilot job left, and why.
 
         A task is stranded when none of its queues
         still has a job on the cluster:
         nothing is left to pull it,
         so waiting on it would block until the caller gives up.
 
+        A subset again, and for a sharper reason than starvation:
+        one group's jobs reaching their walltime
+        says nothing about a task on another group's queue,
+        which may be seconds from finishing.
+
         A `squeue` that cannot be reached leaves liveness *unknown*,
         which is not the same as dead,
         so that case is logged and retried at the next interval
-        rather than aborting a wait that may be perfectly healthy.
+        rather than abandoning a wait that may be perfectly healthy.
         """
         try:
             live = self._live_queues({q for task in pending for q in task.queue})
@@ -535,14 +657,14 @@ class SlurmPilotExecutor:
                 "will retry at the next interval",
                 exc_info=True,
             )
-            return
+            return [], ""
 
         stranded = [task for task in pending if not set(task.queue) & live]
         if not stranded:
-            return
+            return [], ""
 
         queues = sorted({q for task in stranded for q in task.queue})
-        raise RuntimeError(
+        return stranded, (
             f"{len(stranded)} of {len(pending)} pending tasks are on queues with "
             f"no live pilot job, so they can never run: {queues}. "
             f"Scale up a worker group named after one of those queues, "
@@ -626,17 +748,3 @@ class SlurmPilotExecutor:
         # pilot jobs are cancelled on the way out either way,
         # but a failure in the body must not be swallowed.
         self.close()
-
-
-def check_for_error(tasks: list[Task], verbose: bool = True) -> list[Task]:
-    ret = []
-    for task in tasks:
-        if isinstance(task.output, RemoteExecutionError):
-            ret.append(task)
-
-            if verbose:
-                print(f"task_id={task.task_id}")
-                print(f"  error={task.output.error}")
-                print(f"  error_id={task.output.error_id}")
-
-    return ret

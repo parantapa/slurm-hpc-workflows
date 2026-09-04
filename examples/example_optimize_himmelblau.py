@@ -11,12 +11,23 @@ An optimization run cannot: which point is worth trying next
 depends on what the previous points returned,
 so the run is a sequence of *rounds*.
 
-`BayesOptBotorch` fits a Gaussian process to everything measured so far,
+`OptimizeSpaceBotorch` fits a Gaussian process to everything measured so far,
 asks it for a whole batch of points at once,
 evaluates that batch across the pilot pool,
 refits, and repeats.
 The batch is what keeps the pool busy:
 a one-point-at-a-time optimizer would leave all but one worker idle.
+
+That takes two classes and two phases,
+because a model needs something to fit before it can choose anything.
+`ExploreSpaceSobolQMC` sweeps the space first and saves what it measured;
+`OptimizeSpaceBotorch` is handed that file and searches on from it.
+The file is also what makes a run resumable:
+a search stopped by a walltime limit carries on in the next job
+from the exploration file and every search file since.
+Each takes a *list* of tasks, so a second space would be explored
+in the same batch and searched in the same rounds,
+rather than waiting its turn for the pool.
 
 Where the work happens:
 
@@ -52,13 +63,18 @@ import math
 
 from ds_service_client import DsServiceServer
 from slurm_workflows import SlurmPilotExecutor
-from slurm_workflows.bayes_opt_botorch import BayesOptBotorch, FloatRange
+from slurm_workflows.explore_space import ExplorationTask, ExploreSpaceSobolQMC
+from slurm_workflows.optimize_space_botorch import (
+    OptimizationTask,
+    OptimizeSpaceBotorch,
+)
+from slurm_workflows.search_space import FloatRange
 
 SETUP_SCRIPT = ""
 
 # The environment the fit runs in.
 # Same shape as SETUP_SCRIPT, but it has to bring botorch with it:
-# this is the group that imports `bayes_opt_botorch` on a compute node.
+# this is the group that imports `optimize_space_botorch` on a compute node.
 #
 # Aliased to SETUP_SCRIPT because both are empty here,
 # which works only if `/etc/profile` already puts botorch on the path.
@@ -88,6 +104,12 @@ OPTIMIZER_SBATCH_ARGS = [
 ]
 
 JOB_NAME = "himmelblau"
+
+# Where the two phases put what they measured.
+# The exploration writes the first, the search reads it and writes the
+# second; a later run reads both and carries on from there.
+EXPLORE_RESULTS = "himmelblau-explore.pkl.gz"
+SEARCH_RESULTS = "himmelblau-search.pkl.gz"
 
 # The exploration design is scrambled, but seeded:
 # the same seed redraws the same starting points,
@@ -193,65 +215,93 @@ def main():
             executor.scale_workers("eval", 1)
             executor.scale_workers("opt", 1)
 
-            # Constructing the optimizer submits nothing.
-            # It is handed the executor and the two queue names,
-            # and drives `submit` / `wait` itself from here on.
-            opt = BayesOptBotorch(
-                JOB_NAME,
-                SEARCH_SPACE,
-                himmelblau,
+            # Phase 1. The sweep is a list of tasks --- one here, but a
+            # second space would be explored in the same batch rather than
+            # after this one.
+            # Constructing it submits nothing.
+            sweep = ExploreSpaceSobolQMC(
+                [
+                    ExplorationTask(
+                        JOB_NAME,
+                        SEARCH_SPACE,
+                        himmelblau,
+                        "eval",
+                        EXPLORATION_POINTS,
+                        SEED,
+                        # Any extra keyword arguments the objective needs
+                        # but the search should not vary go here.
+                    )
+                ],
                 executor,
-                "eval",
-                "opt",
-                EXPLORATION_POINTS,
-                SEARCH_PARALLELISM,
-                SEED,
-                min_search_iterations=MIN_SEARCH_ITERATIONS,
-                max_search_iterations=MAX_SEARCH_ITERATIONS,
-                patience=PATIENCE,
-                min_improvement=MIN_IMPROVEMENT,
-                # Any further keyword arguments are forwarded to the objective
-                # unchanged, for the constants it needs but the search
-                # should not vary.
             )
 
-            # Both phases block until every point in flight is back,
-            # and both raise if a worker failed
-            # rather than letting a broken value into the model.
-            #
-            # Neither needs a progress report written here:
-            # the optimizer prints the best point after every batch,
-            # plus how long each fit and each proposal took.
-            # A best that stops moving while the fits keep growing
-            # means the budget is going to the model, not the search.
             print(
-                f"\n=== exploration: {opt.num_exploration_points} points, one batch ==="
+                f"\n=== exploration: {sweep.tasks[0].num_exploration_points}"
+                f" points, one batch ==="
             )
-            opt.run_exploration_jobs()
+            sweep.run_exploration_jobs()
+
+            # The file is what the search starts from,
+            # and what makes this run resumable:
+            # the pool can die here and the search still has its points.
+            sweep.save(EXPLORE_RESULTS)
+
+            # Phase 2. The optimizer never explores;
+            # it is handed the results file and models what is in it.
+            opt = OptimizeSpaceBotorch(
+                [
+                    OptimizationTask(
+                        JOB_NAME,
+                        SEARCH_SPACE,
+                        himmelblau,
+                        "eval",
+                        "opt",
+                        SEARCH_PARALLELISM,
+                        min_search_iterations=MIN_SEARCH_ITERATIONS,
+                        max_search_iterations=MAX_SEARCH_ITERATIONS,
+                        patience=PATIENCE,
+                        min_improvement=MIN_IMPROVEMENT,
+                    )
+                ],
+                executor,
+                [EXPLORE_RESULTS],
+            )
 
             # Each round is a barrier: fit, propose a batch, evaluate, refit.
             # That is the cost of choosing the batch jointly,
             # and why the round should be as wide as the pool.
+            #
+            # No progress report is needed here:
+            # the optimizer prints the best point after every round,
+            # plus how long each fit and each proposal took.
+            # A best that stops moving while the fits keep growing
+            # means the budget is going to the model, not the search.
             print(
                 f"\n=== search: up to {MAX_SEARCH_ITERATIONS} rounds"
                 f" of {SEARCH_PARALLELISM} points ==="
             )
             opt.run_search_jobs()
 
-            # `run_search_jobs()` may be called again
-            # for another run of up to MAX_SEARCH_ITERATIONS rounds,
-            # modelling everything measured so far.
+            # Only this run's points, so passing both files to the next
+            # OptimizeSpaceBotorch counts each of them once:
+            #
+            #     OptimizeSpaceBotorch(
+            #         tasks, executor, [EXPLORE_RESULTS, SEARCH_RESULTS]
+            #     )
+            #
+            # which is how a search is carried on in a later job.
+            opt.save(SEARCH_RESULTS)
 
     # The pool is cancelled and the queue is gone,
     # but the optimizer kept every point it evaluated,
     # so the result is an ordinary local value.
-    params, value = opt.best_point()
+    params, value = opt.best_point(JOB_NAME)
     nearest = min(
         KNOWN_MINIMA,
         key=lambda m: (m[0] - params["x"]) ** 2 + (m[1] - params["y"]) ** 2,
     )
     print(f"\nbest f = {value:.6g} (true minimum is 0)")
-    print(f"  full result: {opt.best_output()}")
+    print(f"  full result: {opt.best_output(JOB_NAME)}")
     print(f"  found at x = {params['x']:.4f}, y = {params['y']:.4f}")
     print(f"  nearest known minimum: x = {nearest[0]:.4f}, y = {nearest[1]:.4f}")
 
