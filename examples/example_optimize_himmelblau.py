@@ -71,7 +71,7 @@ TASKS_PER_NODE = 40
 
 SBATCH_ARGS = [
     "--account=bii_nssac",
-    f"--partition=bii --qos=bii-unlimited --nodes={NUM_NODES}",
+    f"--partition=bii --nodes={NUM_NODES}",
     f"--ntasks-per-node={TASKS_PER_NODE} --cpus-per-task=1 --mem=0",
     "--time=1:00:00",
 ]
@@ -82,7 +82,7 @@ SBATCH_ARGS = [
 # The cores still matter --- torch threads the GP fit's linear algebra.
 OPTIMIZER_SBATCH_ARGS = [
     "--account=bii_nssac",
-    "--partition=bii --qos=bii-unlimited --nodes=1",
+    "--partition=bii --nodes=1",
     "--ntasks-per-node=1 --cpus-per-task=40 --mem=0",
     "--time=1:00:00",
 ]
